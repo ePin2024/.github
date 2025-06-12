@@ -6,6 +6,8 @@
 - [프로젝트 구조](#프로젝트-구조)
 - [개발 워크플로우](#개발-워크플로우)
 - [코딩 컨벤션](#코딩-컨벤션)
+- [백엔드 상세 코딩 가이드](#백엔드-상세-코딩-가이드)
+- [프론트엔드 상세 코딩 가이드](#프론트엔드-상세-코딩-가이드)
 - [테스트 가이드라인](#테스트-가이드라인)
 - [배포 프로세스](#배포-프로세스)
 - [문제 해결](#문제-해결)
@@ -156,34 +158,40 @@ Fixes #이슈번호
 
 ## 코딩 컨벤션
 
-### 일반 규칙
+### 백엔드 코딩 컨벤션 (Kotlin)
+- **들여쓰기**: 4칸 공백 사용 (Kotlin 공식 컨벤션)
+- **세미콜론**: 생략 권장 (Kotlin에서는 선택사항)
+- **변수명**: camelCase 사용
+- **상수**: UPPER_SNAKE_CASE 사용
+- **클래스명**: PascalCase 사용
+- **패키지명**: 소문자, 점으로 구분
+- **Boolean 함수**: `flag` 접두사 사용 (예: `flagActive()`)
+
+### 프론트엔드 코딩 컨벤션 (JavaScript/React)
+- **들여쓰기**: 2칸 공백 사용
+- **세미콜론**: 사용 권장 (ESLint 설정에 따라)
+- **변수명**: camelCase 사용
+- **상수**: UPPER_SNAKE_CASE 사용
+- **컴포넌트명**: PascalCase 사용
+- **파일명**: PascalCase (컴포넌트), camelCase (유틸리티)
+- **폴더명**: kebab-case 사용
+
+### 공통 명명 규칙
+- **컴포넌트 파일**: PascalCase (예: `UserProfile.jsx`)
+- **유틸리티 파일**: camelCase (예: `dateUtils.js`)
+- **폴더명**: kebab-case (예: `user-management`)
+- **API 엔드포인트**: kebab-case (예: `/api/v1/user-profiles`)
+
+### 코드 스타일 도구
 #### 백엔드 (Kotlin)
-- 들여쓰기는 4칸 공백 사용 (Kotlin 공식 컨벤션)
-- 세미콜론 생략 권장 (Kotlin에서는 선택사항)
-- 변수명은 camelCase 사용
-- 상수는 UPPER_SNAKE_CASE 사용
+- **Linter**: ktlint
+- **코드 포맷팅**: `./gradlew ktlintFormat`
+- **린트 체크**: `./gradlew ktlintCheck`
 
 #### 프론트엔드 (JavaScript/React)
-- 들여쓰기는 2칸 공백 사용
-- 세미콜론 사용 권장 (ESLint 설정에 따라)
-- 변수명은 camelCase 사용
-- 상수는 UPPER_SNAKE_CASE 사용
-
-### 파일 및 폴더 명명 규칙
-- 컴포넌트 파일: PascalCase (예: `UserProfile.jsx`)
-- 유틸리티 파일: camelCase (예: `dateUtils.js`)
-- 폴더명: kebab-case (예: `user-management`)
-
-### 코드 스타일
-#### 백엔드 (Kotlin)
-- ktlint 설정을 따라주세요
-- 코드 포맷팅: `./gradlew ktlintFormat`
-- 린트 체크: `./gradlew ktlintCheck`
-
-#### 프론트엔드 (JavaScript/React)
-- ESLint와 Prettier 설정을 따라주세요
-- 코드 포맷팅: `npm run format`
-- 린트 체크: `npm run lint`
+- **Linter**: ESLint + Prettier
+- **코드 포맷팅**: `npm run format`
+- **린트 체크**: `npm run lint`
 
 ## 백엔드 상세 코딩 가이드
 
@@ -870,9 +878,1252 @@ class UserController {
 }
 ```
 
-#### Spring Validation 어노테이션 설명
+## 프론트엔드 상세 코딩 가이드
 
-// ... existing code ...
+### React.js 코딩 스타일
+
+#### 컴포넌트 명명 규칙
+```javascript
+// ✅ 좋은 예: PascalCase 사용
+const UserProfile = () => {
+  return <div>User Profile</div>;
+};
+
+// ✅ 파일명도 PascalCase
+// UserProfile.jsx
+
+// ❌ 나쁜 예: camelCase 사용
+const userProfile = () => {
+  return <div>User Profile</div>;
+};
+```
+
+#### 함수형 컴포넌트 vs 클래스형 컴포넌트
+```javascript
+// ✅ 권장: 함수형 컴포넌트 + Hooks 사용
+const UserList = () => {
+  const [users, setUsers] = useState([]);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    fetchUsers();
+  }, []);
+
+  const fetchUsers = async () => {
+    setLoading(true);
+    try {
+      const response = await userApi.getUsers();
+      setUsers(response.data);
+    } catch (error) {
+      console.error('Failed to fetch users:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (loading) return <div>Loading...</div>;
+
+  return (
+    <div className="user-list">
+      {users.map(user => (
+        <UserCard key={user.id} user={user} />
+      ))}
+    </div>
+  );
+};
+
+// ❌ 지양: 클래스형 컴포넌트 (특별한 경우 제외)
+class UserList extends Component {
+  // 구식 방식
+}
+```
+
+### 컴포넌트 설계 원칙
+
+#### 1. Single Responsibility Principle (단일 책임 원칙)
+```javascript
+// ✅ 좋은 예: 각각의 책임이 명확
+const UserCard = ({ user, onEdit, onDelete }) => {
+  return (
+    <div className="user-card">
+      <UserAvatar src={user.avatar} alt={user.name} />
+      <UserInfo user={user} />
+      <UserActions onEdit={onEdit} onDelete={onDelete} />
+    </div>
+  );
+};
+
+const UserAvatar = ({ src, alt }) => (
+  <img src={src} alt={alt} className="user-avatar" />
+);
+
+const UserInfo = ({ user }) => (
+  <div className="user-info">
+    <h3>{user.name}</h3>
+    <p>{user.email}</p>
+  </div>
+);
+
+const UserActions = ({ onEdit, onDelete }) => (
+  <div className="user-actions">
+    <button onClick={onEdit}>Edit</button>
+    <button onClick={onDelete}>Delete</button>
+  </div>
+);
+
+// ❌ 나쁜 예: 하나의 컴포넌트에 모든 책임
+const UserCard = ({ user, onEdit, onDelete }) => {
+  return (
+    <div className="user-card">
+      <img src={user.avatar} alt={user.name} className="user-avatar" />
+      <div className="user-info">
+        <h3>{user.name}</h3>
+        <p>{user.email}</p>
+      </div>
+      <div className="user-actions">
+        <button onClick={onEdit}>Edit</button>
+        <button onClick={onDelete}>Delete</button>
+      </div>
+      {/* 너무 많은 로직이 한 곳에... */}
+    </div>
+  );
+};
+```
+
+#### 2. Props 설계 및 검증
+```javascript
+import PropTypes from 'prop-types';
+
+// ✅ 좋은 예: 명확한 Props 인터페이스
+const UserProfile = ({ 
+  user, 
+  isEditing, 
+  onEdit, 
+  onSave, 
+  onCancel 
+}) => {
+  return (
+    <div className="user-profile">
+      {isEditing ? (
+        <UserEditForm 
+          user={user} 
+          onSave={onSave} 
+          onCancel={onCancel} 
+        />
+      ) : (
+        <UserDisplay 
+          user={user} 
+          onEdit={onEdit} 
+        />
+      )}
+    </div>
+  );
+};
+
+// Props 검증
+UserProfile.propTypes = {
+  user: PropTypes.shape({
+    id: PropTypes.number.isRequired,
+    name: PropTypes.string.isRequired,
+    email: PropTypes.string.isRequired,
+    avatar: PropTypes.string
+  }).isRequired,
+  isEditing: PropTypes.bool,
+  onEdit: PropTypes.func.isRequired,
+  onSave: PropTypes.func.isRequired,
+  onCancel: PropTypes.func.isRequired
+};
+
+// 기본값 설정
+UserProfile.defaultProps = {
+  isEditing: false
+};
+```
+
+### Hooks 사용 가이드
+
+#### 1. useState 최적화
+```javascript
+// ✅ 좋은 예: 관련된 상태를 객체로 그룹화
+const UserForm = () => {
+  const [formData, setFormData] = useState({
+    name: '',
+    email: '',
+    phone: ''
+  });
+  
+  const [formState, setFormState] = useState({
+    loading: false,
+    errors: {},
+    isValid: false
+  });
+
+  const handleInputChange = (field, value) => {
+    setFormData(prev => ({
+      ...prev,
+      [field]: value
+    }));
+  };
+
+  const validateForm = () => {
+    const errors = {};
+    if (!formData.name.trim()) errors.name = 'Name is required';
+    if (!formData.email.trim()) errors.email = 'Email is required';
+    
+    setFormState(prev => ({
+      ...prev,
+      errors,
+      isValid: Object.keys(errors).length === 0
+    }));
+  };
+
+  return (
+    <form>
+      <input
+        value={formData.name}
+        onChange={(e) => handleInputChange('name', e.target.value)}
+        onBlur={validateForm}
+      />
+      {formState.errors.name && (
+        <span className="error">{formState.errors.name}</span>
+      )}
+    </form>
+  );
+};
+
+// ❌ 나쁜 예: 너무 많은 개별 state
+const UserForm = () => {
+  const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
+  const [phone, setPhone] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [nameError, setNameError] = useState('');
+  const [emailError, setEmailError] = useState('');
+  // 상태가 흩어져서 관리가 어려움
+};
+```
+
+#### 2. useEffect 최적화
+```javascript
+// ✅ 좋은 예: 의존성 배열 명시적 관리
+const UserProfile = ({ userId }) => {
+  const [user, setUser] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  // 사용자 데이터 로딩
+  useEffect(() => {
+    const fetchUser = async () => {
+      setLoading(true);
+      try {
+        const userData = await userApi.getUser(userId);
+        setUser(userData);
+      } catch (error) {
+        console.error('Failed to fetch user:', error);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    if (userId) {
+      fetchUser();
+    }
+  }, [userId]); // userId가 변경될 때만 실행
+
+  // 클린업 함수 사용
+  useEffect(() => {
+    const timer = setInterval(() => {
+      // 주기적 업데이트
+    }, 5000);
+
+    return () => clearInterval(timer); // 클린업
+  }, []);
+
+  return loading ? <div>Loading...</div> : <UserDetails user={user} />;
+};
+
+// ❌ 나쁜 예: 의존성 배열 누락
+const UserProfile = ({ userId }) => {
+  const [user, setUser] = useState(null);
+
+  useEffect(() => {
+    userApi.getUser(userId).then(setUser);
+  }); // 의존성 배열 없음 - 무한 루프!
+};
+```
+
+#### 3. 커스텀 Hook 활용
+```javascript
+// ✅ 재사용 가능한 커스텀 Hook
+const useApi = (apiCall, dependencies = []) => {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  const execute = useCallback(async (...args) => {
+    setLoading(true);
+    setError(null);
+    
+    try {
+      const result = await apiCall(...args);
+      setData(result);
+      return result;
+    } catch (err) {
+      setError(err);
+      throw err;
+    } finally {
+      setLoading(false);
+    }
+  }, dependencies);
+
+  return { data, loading, error, execute };
+};
+
+// 사용 예시
+const UserList = () => {
+  const { 
+    data: users, 
+    loading, 
+    error, 
+    execute: fetchUsers 
+  } = useApi(userApi.getUsers);
+
+  useEffect(() => {
+    fetchUsers();
+  }, [fetchUsers]);
+
+  if (loading) return <div>Loading...</div>;
+  if (error) return <div>Error: {error.message}</div>;
+
+  return (
+    <div>
+      {users?.map(user => (
+        <UserCard key={user.id} user={user} />
+      ))}
+    </div>
+  );
+};
+
+// Form 관리용 커스텀 Hook
+const useForm = (initialValues, validationRules) => {
+  const [values, setValues] = useState(initialValues);
+  const [errors, setErrors] = useState({});
+  const [touched, setTouched] = useState({});
+
+  const setValue = (field, value) => {
+    setValues(prev => ({ ...prev, [field]: value }));
+  };
+
+  const setTouched = (field) => {
+    setTouched(prev => ({ ...prev, [field]: true }));
+  };
+
+  const validate = () => {
+    const newErrors = {};
+    Object.keys(validationRules).forEach(field => {
+      const rule = validationRules[field];
+      const value = values[field];
+      
+      if (rule.required && (!value || value.trim() === '')) {
+        newErrors[field] = `${field} is required`;
+      } else if (rule.pattern && !rule.pattern.test(value)) {
+        newErrors[field] = rule.message;
+      }
+    });
+    
+    setErrors(newErrors);
+    return Object.keys(newErrors).length === 0;
+  };
+
+  const reset = () => {
+    setValues(initialValues);
+    setErrors({});
+    setTouched({});
+  };
+
+  return {
+    values,
+    errors,
+    touched,
+    setValue,
+    setTouched,
+    validate,
+    reset,
+    isValid: Object.keys(errors).length === 0
+  };
+};
+```
+
+### 상태 관리 패턴
+
+#### 1. Local State vs Global State
+```javascript
+// ✅ Local State: 컴포넌트 내부에서만 사용
+const UserCard = ({ user }) => {
+  const [isExpanded, setIsExpanded] = useState(false);
+  const [isEditing, setIsEditing] = useState(false);
+
+  return (
+    <div className="user-card">
+      <button onClick={() => setIsExpanded(!isExpanded)}>
+        {isExpanded ? 'Collapse' : 'Expand'}
+      </button>
+      {isExpanded && <UserDetails user={user} />}
+    </div>
+  );
+};
+
+// ✅ Global State: Context API 사용
+const UserContext = createContext();
+
+const UserProvider = ({ children }) => {
+  const [currentUser, setCurrentUser] = useState(null);
+  const [users, setUsers] = useState([]);
+
+  const login = async (credentials) => {
+    const user = await authApi.login(credentials);
+    setCurrentUser(user);
+  };
+
+  const logout = () => {
+    setCurrentUser(null);
+  };
+
+  return (
+    <UserContext.Provider value={{
+      currentUser,
+      users,
+      login,
+      logout,
+      setUsers
+    }}>
+      {children}
+    </UserContext.Provider>
+  );
+};
+
+// 사용
+const useUser = () => {
+  const context = useContext(UserContext);
+  if (!context) {
+    throw new Error('useUser must be used within UserProvider');
+  }
+  return context;
+};
+```
+
+#### 2. Redux Toolkit 사용 (복잡한 상태 관리)
+```javascript
+// store/userSlice.js
+import { createSlice, createAsyncThunk } from '@reduxjs/toolkit';
+
+// 비동기 액션
+export const fetchUsers = createAsyncThunk(
+  'users/fetchUsers',
+  async (_, { rejectWithValue }) => {
+    try {
+      const response = await userApi.getUsers();
+      return response.data;
+    } catch (error) {
+      return rejectWithValue(error.response.data);
+    }
+  }
+);
+
+const userSlice = createSlice({
+  name: 'users',
+  initialState: {
+    users: [],
+    currentUser: null,
+    loading: false,
+    error: null
+  },
+  reducers: {
+    setCurrentUser: (state, action) => {
+      state.currentUser = action.payload;
+    },
+    clearError: (state) => {
+      state.error = null;
+    }
+  },
+  extraReducers: (builder) => {
+    builder
+      .addCase(fetchUsers.pending, (state) => {
+        state.loading = true;
+        state.error = null;
+      })
+      .addCase(fetchUsers.fulfilled, (state, action) => {
+        state.loading = false;
+        state.users = action.payload;
+      })
+      .addCase(fetchUsers.rejected, (state, action) => {
+        state.loading = false;
+        state.error = action.payload;
+      });
+  }
+});
+
+export const { setCurrentUser, clearError } = userSlice.actions;
+export default userSlice.reducer;
+
+// 컴포넌트에서 사용
+const UserList = () => {
+  const dispatch = useDispatch();
+  const { users, loading, error } = useSelector(state => state.users);
+
+  useEffect(() => {
+    dispatch(fetchUsers());
+  }, [dispatch]);
+
+  if (loading) return <div>Loading...</div>;
+  if (error) return <div>Error: {error}</div>;
+
+  return (
+    <div>
+      {users.map(user => (
+        <UserCard key={user.id} user={user} />
+      ))}
+    </div>
+  );
+};
+```
+
+### 성능 최적화
+
+#### 1. React.memo와 useMemo, useCallback
+```javascript
+// ✅ React.memo로 불필요한 리렌더링 방지
+const UserCard = React.memo(({ user, onEdit, onDelete }) => {
+  console.log('UserCard rendered for:', user.name);
+  
+  return (
+    <div className="user-card">
+      <h3>{user.name}</h3>
+      <p>{user.email}</p>
+      <button onClick={() => onEdit(user.id)}>Edit</button>
+      <button onClick={() => onDelete(user.id)}>Delete</button>
+    </div>
+  );
+});
+
+// Props 비교 함수 (선택사항)
+const UserCard = React.memo(({ user, onEdit, onDelete }) => {
+  // 컴포넌트 내용
+}, (prevProps, nextProps) => {
+  return prevProps.user.id === nextProps.user.id &&
+         prevProps.user.name === nextProps.user.name &&
+         prevProps.user.email === nextProps.user.email;
+});
+
+// ✅ useMemo로 비싼 계산 최적화
+const UserStatistics = ({ users }) => {
+  const statistics = useMemo(() => {
+    console.log('Calculating statistics...');
+    return {
+      totalUsers: users.length,
+      activeUsers: users.filter(user => user.status === 'active').length,
+      averageAge: users.reduce((sum, user) => sum + user.age, 0) / users.length
+    };
+  }, [users]); // users가 변경될 때만 재계산
+
+  return (
+    <div>
+      <p>Total Users: {statistics.totalUsers}</p>
+      <p>Active Users: {statistics.activeUsers}</p>
+      <p>Average Age: {statistics.averageAge}</p>
+    </div>
+  );
+};
+
+// ✅ useCallback으로 함수 최적화
+const UserList = () => {
+  const [users, setUsers] = useState([]);
+  const [filter, setFilter] = useState('');
+
+  // 함수가 매번 새로 생성되는 것을 방지
+  const handleEdit = useCallback((userId) => {
+    console.log('Editing user:', userId);
+    // 편집 로직
+  }, []);
+
+  const handleDelete = useCallback((userId) => {
+    setUsers(prev => prev.filter(user => user.id !== userId));
+  }, []);
+
+  const filteredUsers = useMemo(() => {
+    return users.filter(user => 
+      user.name.toLowerCase().includes(filter.toLowerCase())
+    );
+  }, [users, filter]);
+
+  return (
+    <div>
+      <input 
+        value={filter}
+        onChange={(e) => setFilter(e.target.value)}
+        placeholder="Filter users..."
+      />
+      {filteredUsers.map(user => (
+        <UserCard 
+          key={user.id} 
+          user={user}
+          onEdit={handleEdit}
+          onDelete={handleDelete}
+        />
+      ))}
+    </div>
+  );
+};
+```
+
+#### 2. Lazy Loading과 Code Splitting
+```javascript
+// ✅ React.lazy로 컴포넌트 지연 로딩
+const UserProfile = React.lazy(() => import('./UserProfile'));
+const UserSettings = React.lazy(() => import('./UserSettings'));
+const AdminPanel = React.lazy(() => import('./AdminPanel'));
+
+const App = () => {
+  return (
+    <Router>
+      <Suspense fallback={<div>Loading...</div>}>
+        <Routes>
+          <Route path="/profile" element={<UserProfile />} />
+          <Route path="/settings" element={<UserSettings />} />
+          <Route path="/admin" element={<AdminPanel />} />
+        </Routes>
+      </Suspense>
+    </Router>
+  );
+};
+
+// ✅ 동적 import로 조건부 로딩
+const UserDashboard = () => {
+  const [showChart, setShowChart] = useState(false);
+  const [ChartComponent, setChartComponent] = useState(null);
+
+  const loadChart = async () => {
+    if (!ChartComponent) {
+      const { default: Chart } = await import('./Chart');
+      setChartComponent(() => Chart);
+    }
+    setShowChart(true);
+  };
+
+  return (
+    <div>
+      <button onClick={loadChart}>Show Chart</button>
+      {showChart && ChartComponent && <ChartComponent />}
+    </div>
+  );
+};
+```
+
+### 스타일링 가이드
+
+#### 1. CSS Modules
+```javascript
+// UserCard.module.css
+.card {
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  padding: 16px;
+  margin: 8px 0;
+  background: white;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.card:hover {
+  box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+}
+
+.title {
+  font-size: 1.2rem;
+  font-weight: bold;
+  margin-bottom: 8px;
+  color: #333;
+}
+
+.email {
+  color: #666;
+  font-size: 0.9rem;
+}
+
+.actions {
+  margin-top: 12px;
+  display: flex;
+  gap: 8px;
+}
+
+.button {
+  padding: 6px 12px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.8rem;
+}
+
+.editButton {
+  background: #007bff;
+  color: white;
+}
+
+.deleteButton {
+  background: #dc3545;
+  color: white;
+}
+
+// UserCard.jsx
+import styles from './UserCard.module.css';
+
+const UserCard = ({ user, onEdit, onDelete }) => {
+  return (
+    <div className={styles.card}>
+      <h3 className={styles.title}>{user.name}</h3>
+      <p className={styles.email}>{user.email}</p>
+      <div className={styles.actions}>
+        <button 
+          className={`${styles.button} ${styles.editButton}`}
+          onClick={() => onEdit(user.id)}
+        >
+          Edit
+        </button>
+        <button 
+          className={`${styles.button} ${styles.deleteButton}`}
+          onClick={() => onDelete(user.id)}
+        >
+          Delete
+        </button>
+      </div>
+    </div>
+  );
+};
+```
+
+#### 2. Styled Components
+```javascript
+import styled from 'styled-components';
+
+// ✅ 기본 스타일 컴포넌트
+const Card = styled.div`
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  padding: 16px;
+  margin: 8px 0;
+  background: white;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+  transition: box-shadow 0.2s ease;
+
+  &:hover {
+    box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+  }
+`;
+
+const Title = styled.h3`
+  font-size: 1.2rem;
+  font-weight: bold;
+  margin-bottom: 8px;
+  color: #333;
+`;
+
+const Email = styled.p`
+  color: #666;
+  font-size: 0.9rem;
+  margin: 0;
+`;
+
+const Actions = styled.div`
+  margin-top: 12px;
+  display: flex;
+  gap: 8px;
+`;
+
+// ✅ Props 기반 스타일링
+const Button = styled.button`
+  padding: 6px 12px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.8rem;
+  transition: opacity 0.2s ease;
+
+  &:hover {
+    opacity: 0.8;
+  }
+
+  ${props => props.variant === 'primary' && `
+    background: #007bff;
+    color: white;
+  `}
+
+  ${props => props.variant === 'danger' && `
+    background: #dc3545;
+    color: white;
+  `}
+`;
+
+// 사용
+const UserCard = ({ user, onEdit, onDelete }) => {
+  return (
+    <div className={styles.card}>
+      <h3 className={styles.title}>{user.name}</h3>
+      <p className={styles.email}>{user.email}</p>
+      <div className={styles.actions}>
+        <button 
+          className={`${styles.button} ${styles.editButton}`}
+          onClick={() => onEdit(user.id)}
+        >
+          Edit
+        </button>
+        <button 
+          className={`${styles.button} ${styles.deleteButton}`}
+          onClick={() => onDelete(user.id)}
+        >
+          Delete
+        </button>
+      </div>
+    </div>
+  );
+};
+```
+
+### API 통신 패턴
+
+#### 1. Axios 기반 API 클라이언트
+```javascript
+// api/client.js
+import axios from 'axios';
+
+const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || 'http://localhost:8080';
+
+const apiClient = axios.create({
+  baseURL: API_BASE_URL,
+  timeout: 10000,
+  headers: {
+    'Content-Type': 'application/json'
+  }
+});
+
+// 요청 인터셉터
+apiClient.interceptors.request.use(
+  (config) => {
+    const token = localStorage.getItem('authToken');
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+    return config;
+  },
+  (error) => Promise.reject(error)
+);
+
+// 응답 인터셉터
+apiClient.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response?.status === 401) {
+      localStorage.removeItem('authToken');
+      window.location.href = '/login';
+    }
+    return Promise.reject(error);
+  }
+);
+
+export default apiClient;
+
+// api/userApi.js
+import apiClient from './client';
+
+export const userApi = {
+  getUsers: (params = {}) => {
+    return apiClient.get('/api/v1/users', { params });
+  },
+
+  getUser: (id) => {
+    return apiClient.get(`/api/v1/users/${id}`);
+  },
+
+  createUser: (userData) => {
+    return apiClient.post('/api/v1/users', userData);
+  },
+
+  updateUser: (id, userData) => {
+    return apiClient.put(`/api/v1/users/${id}`, userData);
+  },
+
+  deleteUser: (id) => {
+    return apiClient.delete(`/api/v1/users/${id}`);
+  }
+};
+```
+
+#### 2. React Query 사용 (권장)
+```javascript
+// hooks/useUsers.js
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { userApi } from '../api/userApi';
+
+export const useUsers = (params = {}) => {
+  return useQuery({
+    queryKey: ['users', params],
+    queryFn: () => userApi.getUsers(params),
+    select: (response) => response.data,
+    staleTime: 5 * 60 * 1000, // 5분
+    cacheTime: 10 * 60 * 1000, // 10분
+  });
+};
+
+export const useUser = (id) => {
+  return useQuery({
+    queryKey: ['user', id],
+    queryFn: () => userApi.getUser(id),
+    select: (response) => response.data,
+    enabled: !!id, // id가 있을 때만 실행
+  });
+};
+
+export const useCreateUser = () => {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: userApi.createUser,
+    onSuccess: () => {
+      // 사용자 목록 캐시 무효화
+      queryClient.invalidateQueries({ queryKey: ['users'] });
+    },
+    onError: (error) => {
+      console.error('Failed to create user:', error);
+    }
+  });
+};
+
+export const useUpdateUser = () => {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({ id, ...data }) => userApi.updateUser(id, data),
+    onSuccess: (_, variables) => {
+      // 특정 사용자 캐시 무효화
+      queryClient.invalidateQueries({ queryKey: ['user', variables.id] });
+      queryClient.invalidateQueries({ queryKey: ['users'] });
+    }
+  });
+};
+
+// 컴포넌트에서 사용
+const UserList = () => {
+  const { data: users, isLoading, error } = useUsers();
+  const createUserMutation = useCreateUser();
+
+  const handleCreateUser = async (userData) => {
+    try {
+      await createUserMutation.mutateAsync(userData);
+      // 성공 메시지 표시
+    } catch (error) {
+      // 에러 메시지 표시
+    }
+  };
+
+  if (isLoading) return <div>Loading...</div>;
+  if (error) return <div>Error: {error.message}</div>;
+
+  return (
+    <div>
+      {users?.map(user => (
+        <UserCard key={user.id} user={user} />
+      ))}
+    </div>
+  );
+};
+```
+
+### 에러 처리 패턴
+
+#### 1. Error Boundary
+```javascript
+// components/ErrorBoundary.jsx
+class ErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error, errorInfo) {
+    console.error('Error caught by boundary:', error, errorInfo);
+    // 에러 로깅 서비스로 전송
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="error-boundary">
+          <h2>Something went wrong.</h2>
+          <details>
+            {this.state.error && this.state.error.toString()}
+          </details>
+          <button onClick={() => window.location.reload()}>
+            Reload Page
+          </button>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
+
+// App.jsx에서 사용
+const App = () => {
+  return (
+    <ErrorBoundary>
+      <Router>
+        <Routes>
+          <Route path="/" element={<Home />} />
+          <Route path="/users" element={<UserList />} />
+        </Routes>
+      </Router>
+    </ErrorBoundary>
+  );
+};
+```
+
+#### 2. 글로벌 에러 처리
+```javascript
+// context/ErrorContext.jsx
+const ErrorContext = createContext();
+
+export const ErrorProvider = ({ children }) => {
+  const [errors, setErrors] = useState([]);
+
+  const addError = (error) => {
+    const errorId = Date.now();
+    setErrors(prev => [...prev, { id: errorId, message: error.message }]);
+    
+    // 5초 후 자동 제거
+    setTimeout(() => {
+      removeError(errorId);
+    }, 5000);
+  };
+
+  const removeError = (id) => {
+    setErrors(prev => prev.filter(error => error.id !== id));
+  };
+
+  return (
+    <ErrorContext.Provider value={{ errors, addError, removeError }}>
+      {children}
+    </ErrorContext.Provider>
+  );
+};
+
+// components/ErrorToast.jsx
+const ErrorToast = ({ errors, onRemove }) => {
+  return (
+    <div className="error-toast-container">
+      {errors.map(error => (
+        <div key={error.id} className="error-toast">
+          <span>{error.message}</span>
+          <button onClick={() => onRemove(error.id)}>×</button>
+        </div>
+      ))}
+    </div>
+  );
+};
+```
+
+### 테스트 작성 가이드
+
+#### 1. 컴포넌트 테스트 (React Testing Library)
+```javascript
+// UserCard.test.jsx
+import { render, screen, fireEvent } from '@testing-library/react';
+import { UserCard } from './UserCard';
+
+const mockUser = {
+  id: 1,
+  name: 'John Doe',
+  email: 'john@example.com'
+};
+
+describe('UserCard', () => {
+  it('renders user information correctly', () => {
+    render(
+      <UserCard 
+        user={mockUser} 
+        onEdit={() => {}} 
+        onDelete={() => {}} 
+      />
+    );
+
+    expect(screen.getByText('John Doe')).toBeInTheDocument();
+    expect(screen.getByText('john@example.com')).toBeInTheDocument();
+  });
+
+  it('calls onEdit when edit button is clicked', () => {
+    const onEdit = jest.fn();
+    
+    render(
+      <UserCard 
+        user={mockUser} 
+        onEdit={onEdit} 
+        onDelete={() => {}} 
+      />
+    );
+
+    fireEvent.click(screen.getByText('Edit'));
+    expect(onEdit).toHaveBeenCalledWith(1);
+  });
+
+  it('calls onDelete when delete button is clicked', () => {
+    const onDelete = jest.fn();
+    
+    render(
+      <UserCard 
+        user={mockUser} 
+        onEdit={() => {}} 
+        onDelete={onDelete} 
+      />
+    );
+
+    fireEvent.click(screen.getByText('Delete'));
+    expect(onDelete).toHaveBeenCalledWith(1);
+  });
+});
+```
+
+#### 2. 커스텀 Hook 테스트
+```javascript
+// useUsers.test.js
+import { renderHook, waitFor } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { useUsers } from './useUsers';
+import { userApi } from '../api/userApi';
+
+jest.mock('../api/userApi');
+
+const createWrapper = () => {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false },
+      mutations: { retry: false },
+    },
+  });
+
+  return ({ children }) => (
+    <QueryClientProvider client={queryClient}>
+      {children}
+    </QueryClientProvider>
+  );
+};
+
+describe('useUsers', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('fetches users successfully', async () => {
+    const mockUsers = [
+      { id: 1, name: 'John Doe', email: 'john@example.com' }
+    ];
+    
+    userApi.getUsers.mockResolvedValue({ data: mockUsers });
+
+    const { result } = renderHook(() => useUsers(), {
+      wrapper: createWrapper(),
+    });
+
+    await waitFor(() => {
+      expect(result.current.isSuccess).toBe(true);
+    });
+
+    expect(result.current.data).toEqual(mockUsers);
+  });
+
+  it('handles error correctly', async () => {
+    userApi.getUsers.mockRejectedValue(new Error('API Error'));
+
+    const { result } = renderHook(() => useUsers(), {
+      wrapper: createWrapper(),
+    });
+
+    await waitFor(() => {
+      expect(result.current.isError).toBe(true);
+    });
+
+    expect(result.current.error.message).toBe('API Error');
+  });
+});
+```
+
+### 실무 팁 및 베스트 프랙티스
+
+#### 1. 폴더 구조 권장안
+```
+src/
+├── components/          # 재사용 가능한 컴포넌트
+│   ├── ui/             # 기본 UI 컴포넌트 (Button, Input 등)
+│   ├── layout/         # 레이아웃 컴포넌트
+│   └── common/         # 공통 컴포넌트
+├── pages/              # 페이지 컴포넌트
+├── hooks/              # 커스텀 Hook
+├── context/            # Context 제공자
+├── api/                # API 관련
+├── utils/              # 유틸리티 함수
+├── constants/          # 상수
+├── styles/             # 글로벌 스타일
+└── __tests__/          # 테스트 파일
+```
+
+#### 2. 환경 변수 관리
+```javascript
+// .env.development
+REACT_APP_API_BASE_URL=http://localhost:8080
+REACT_APP_APP_NAME=Dev App
+
+// .env.production
+REACT_APP_API_BASE_URL=https://api.example.com
+REACT_APP_APP_NAME=Production App
+
+// config/env.js
+export const config = {
+  apiBaseUrl: process.env.REACT_APP_API_BASE_URL,
+  appName: process.env.REACT_APP_APP_NAME,
+  isDevelopment: process.env.NODE_ENV === 'development',
+  isProduction: process.env.NODE_ENV === 'production',
+};
+```
+
+#### 3. 타입 안정성 (PropTypes 또는 TypeScript)
+```javascript
+// TypeScript 사용 시 (권장)
+interface User {
+  id: number;
+  name: string;
+  email: string;
+  avatar?: string;
+}
+
+interface UserCardProps {
+  user: User;
+  onEdit: (id: number) => void;
+  onDelete: (id: number) => void;
+}
+
+const UserCard: React.FC<UserCardProps> = ({ user, onEdit, onDelete }) => {
+  return (
+    <div className="user-card">
+      <h3>{user.name}</h3>
+      <p>{user.email}</p>
+      <button onClick={() => onEdit(user.id)}>Edit</button>
+      <button onClick={() => onDelete(user.id)}>Delete</button>
+    </div>
+  );
+};
+```
+
+이제 **완전한 React.js 프론트엔드 개발 가이드**가 완성되었습니다! 🎉
 
 ## 테스트 가이드라인
 
