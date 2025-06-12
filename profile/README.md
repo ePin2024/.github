@@ -508,7 +508,141 @@ data class UserResponse(
 
 ### REST API 설계 가이드
 
-#### Controller 구현
+#### RESTful Endpoint 설계 원칙
+
+**1. 리소스 중심 설계**
+```bash
+# ✅ 좋은 예: 명사형 리소스 사용
+GET    /api/v1/users          # 사용자 목록 조회
+POST   /api/v1/users          # 사용자 생성
+GET    /api/v1/users/{id}     # 특정 사용자 조회
+PUT    /api/v1/users/{id}     # 사용자 전체 수정
+PATCH  /api/v1/users/{id}     # 사용자 부분 수정
+DELETE /api/v1/users/{id}     # 사용자 삭제
+
+# ❌ 나쁜 예: 동사형 사용
+POST /api/v1/createUser       # 동사 사용 금지
+GET  /api/v1/getUser/{id}     # 동사 사용 금지
+POST /api/v1/deleteUser/{id}  # 잘못된 HTTP 메서드
+```
+
+**2. HTTP 메서드별 사용 규칙**
+
+| HTTP 메서드 | 목적 | 멱등성 | 요청 Body | 응답 Body |
+|-------------|------|--------|-----------|-----------|
+| **GET** | 조회 | ✅ | ❌ | ✅ |
+| **POST** | 생성 | ❌ | ✅ | ✅ |
+| **PUT** | 전체 수정 | ✅ | ✅ | ✅ |
+| **PATCH** | 부분 수정 | ❌ | ✅ | ✅ |
+| **DELETE** | 삭제 | ✅ | ❌ | ✅ |
+
+**3. URL 패턴 및 명명 규칙**
+```bash
+# 기본 패턴: /api/{version}/{resource}
+/api/v1/users
+/api/v1/orders
+/api/v1/products
+
+# 계층적 리소스: 부모/자식 관계
+GET    /api/v1/users/{userId}/orders           # 특정 사용자의 주문 목록
+POST   /api/v1/users/{userId}/orders           # 특정 사용자의 주문 생성
+GET    /api/v1/users/{userId}/orders/{orderId} # 특정 사용자의 특정 주문
+PUT    /api/v1/orders/{orderId}/items/{itemId} # 주문의 특정 아이템 수정
+
+# 복합 리소스 조회
+GET /api/v1/orders/{orderId}/items              # 주문의 아이템 목록
+GET /api/v1/categories/{categoryId}/products    # 카테고리별 상품 목록
+```
+
+**4. 쿼리 파라미터 활용**
+```bash
+# 필터링
+GET /api/v1/users?status=active&role=admin
+GET /api/v1/orders?status=pending&userId=123
+
+# 정렬
+GET /api/v1/users?sort=createdAt,desc
+GET /api/v1/products?sort=price,asc&sort=name,desc
+
+# 페이징
+GET /api/v1/users?page=0&size=20
+GET /api/v1/orders?page=1&size=50&sort=createdAt,desc
+
+# 검색
+GET /api/v1/users?search=john
+GET /api/v1/products?name=contains:phone&price=gte:100000
+
+# 필드 선택 (부분 응답)
+GET /api/v1/users?fields=id,name,email
+GET /api/v1/orders?fields=id,status,totalAmount
+```
+
+**5. HTTP 상태 코드 가이드**
+
+**성공 응답 (2xx)**
+```kotlin
+// 200 OK: 조회/수정 성공
+@GetMapping("/{id}")
+@ResponseStatus(HttpStatus.OK)
+fun getUser(@PathVariable id: Long): ApiResponse<UserResponse>
+
+// 201 Created: 생성 성공
+@PostMapping
+@ResponseStatus(HttpStatus.CREATED)
+fun createUser(@RequestBody request: CreateUserRequest): ApiResponse<UserResponse>
+
+// 204 No Content: 삭제 성공 (응답 Body 없음)
+@DeleteMapping("/{id}")
+@ResponseStatus(HttpStatus.NO_CONTENT)
+fun deleteUser(@PathVariable id: Long)
+```
+
+**클라이언트 오류 (4xx)**
+```kotlin
+// 400 Bad Request: 잘못된 요청
+return ResponseEntity.badRequest().body(
+    ApiResponse.failure("Invalid request parameters")
+)
+
+// 401 Unauthorized: 인증 필요
+return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+    ApiResponse.failure("Authentication required")
+)
+
+// 403 Forbidden: 권한 없음
+return ResponseEntity.status(HttpStatus.FORBIDDEN).body(
+    ApiResponse.failure("Access denied")
+)
+
+// 404 Not Found: 리소스 없음
+return ResponseEntity.notFound().build()
+
+// 409 Conflict: 리소스 충돌
+return ResponseEntity.status(HttpStatus.CONFLICT).body(
+    ApiResponse.failure("Email already exists")
+)
+
+// 422 Unprocessable Entity: 검증 실패
+return ResponseEntity.unprocessableEntity().body(
+    ApiResponse.failure("Validation failed", errors)
+)
+```
+
+**6. API 버저닝 전략**
+```bash
+# URL 버저닝 (권장)
+/api/v1/users
+/api/v2/users
+
+# Header 버저닝
+GET /api/users
+Accept: application/vnd.company.v1+json
+
+# 파라미터 버저닝
+GET /api/users?version=1
+```
+
+**7. 실제 Controller 구현 예제**
 ```kotlin
 @RestController
 @RequestMapping("/api/v1/users")
@@ -517,6 +651,32 @@ class UserController(
     private val userApplicationService: UserApplicationService
 ) {
     
+    // 사용자 목록 조회 (페이징, 필터링, 정렬)
+    @GetMapping
+    fun getUsers(
+        @RequestParam(defaultValue = "0") @Min(0) page: Int,
+        @RequestParam(defaultValue = "20") @Min(1) @Max(100) size: Int,
+        @RequestParam(defaultValue = "createdAt,desc") sort: String,
+        @RequestParam(required = false) status: UserStatus?,
+        @RequestParam(required = false) search: String?
+    ): ResponseEntity<ApiResponse<Page<UserResponse>>> {
+        
+        val pageable = PageRequest.of(page, size, parseSort(sort))
+        val users = userApplicationService.getUsers(pageable, status, search)
+        
+        return ResponseEntity.ok(ApiResponse.success(users))
+    }
+    
+    // 특정 사용자 조회
+    @GetMapping("/{id}")
+    fun getUserById(
+        @PathVariable @Min(1) id: Long
+    ): ResponseEntity<ApiResponse<UserResponse>> {
+        val user = userApplicationService.getUserById(id)
+        return ResponseEntity.ok(ApiResponse.success(user))
+    }
+    
+    // 사용자 생성
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
     fun createUser(
@@ -529,7 +689,7 @@ class UserController(
         
         val user = userApplicationService.createUser(command)
         
-        return ResponseEntity.ok(
+        return ResponseEntity.status(HttpStatus.CREATED).body(
             ApiResponse.success(
                 data = user,
                 message = "User created successfully"
@@ -537,31 +697,95 @@ class UserController(
         )
     }
     
-    @GetMapping("/{id}")
-    fun getUserById(
-        @PathVariable @Min(1) id: Long
+    // 사용자 전체 수정
+    @PutMapping("/{id}")
+    fun updateUser(
+        @PathVariable @Min(1) id: Long,
+        @Valid @RequestBody request: UpdateUserRequest
     ): ResponseEntity<ApiResponse<UserResponse>> {
-        val user = userApplicationService.getUserById(id)
+        val command = UpdateUserCommand(
+            id = id,
+            name = request.name,
+            email = request.email,
+            status = request.status
+        )
+        
+        val user = userApplicationService.updateUser(command)
         
         return ResponseEntity.ok(
-            ApiResponse.success(data = user)
+            ApiResponse.success(
+                data = user,
+                message = "User updated successfully"
+            )
         )
     }
     
-    @GetMapping
-    fun getUsers(
-        @RequestParam(defaultValue = "0") @Min(0) page: Int,
-        @RequestParam(defaultValue = "20") @Min(1) @Max(100) size: Int
-    ): ResponseEntity<ApiResponse<Page<UserResponse>>> {
-        val users = userApplicationService.getUsersByPage(page, size)
+    // 사용자 부분 수정
+    @PatchMapping("/{id}")
+    fun patchUser(
+        @PathVariable @Min(1) id: Long,
+        @Valid @RequestBody request: PatchUserRequest
+    ): ResponseEntity<ApiResponse<UserResponse>> {
+        val command = PatchUserCommand(
+            id = id,
+            name = request.name,
+            status = request.status
+        )
+        
+        val user = userApplicationService.patchUser(command)
         
         return ResponseEntity.ok(
-            ApiResponse.success(data = users)
+            ApiResponse.success(
+                data = user,
+                message = "User updated successfully"
+            )
         )
     }
+    
+    // 사용자 삭제
+    @DeleteMapping("/{id}")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    fun deleteUser(
+        @PathVariable @Min(1) id: Long
+    ): ResponseEntity<Void> {
+        userApplicationService.deleteUser(id)
+        return ResponseEntity.noContent().build()
+    }
+    
+    // 사용자의 주문 목록 조회 (계층적 리소스)
+    @GetMapping("/{userId}/orders")
+    fun getUserOrders(
+        @PathVariable @Min(1) userId: Long,
+        @RequestParam(defaultValue = "0") @Min(0) page: Int,
+        @RequestParam(defaultValue = "20") @Min(1) @Max(100) size: Int
+    ): ResponseEntity<ApiResponse<Page<OrderResponse>>> {
+        val pageable = PageRequest.of(page, size)
+        val orders = orderApplicationService.getOrdersByUserId(userId, pageable)
+        
+        return ResponseEntity.ok(ApiResponse.success(orders))
+    }
+    
+    // 정렬 파라미터 파싱 유틸리티
+    private fun parseSort(sortParam: String): Sort {
+        return try {
+            val parts = sortParam.split(",")
+            val property = parts[0]
+            val direction = if (parts.size > 1 && parts[1].lowercase() == "desc") {
+                Sort.Direction.DESC
+            } else {
+                Sort.Direction.ASC
+            }
+            Sort.by(direction, property)
+        } catch (e: Exception) {
+            Sort.by(Sort.Direction.DESC, "createdAt")  // 기본값
+        }
+    }
 }
+```
 
-// API 요청 DTO
+**8. 요청/응답 DTO 설계**
+```kotlin
+// 생성 요청 DTO
 data class CreateUserRequest(
     @field:NotBlank(message = "Name is required")
     @field:Size(min = 2, max = 50, message = "Name must be between 2 and 50 characters")
@@ -571,361 +795,84 @@ data class CreateUserRequest(
     @field:Email(message = "Invalid email format")
     val email: String
 )
-```
 
-#### 표준 API 응답 형식
-```kotlin
-data class ApiResponse<T>(
-    val success: Boolean,
-    val data: T?,
-    val message: String?,
-    val errors: List<String>?,
-    val timestamp: LocalDateTime = LocalDateTime.now()
+// 전체 수정 요청 DTO (모든 필드 필수)
+data class UpdateUserRequest(
+    @field:NotBlank(message = "Name is required")
+    @field:Size(min = 2, max = 50)
+    val name: String,
+    
+    @field:NotBlank(message = "Email is required")
+    @field:Email(message = "Invalid email format")
+    val email: String,
+    
+    @field:NotNull(message = "Status is required")
+    val status: UserStatus
+)
+
+// 부분 수정 요청 DTO (모든 필드 선택사항)
+data class PatchUserRequest(
+    @field:Size(min = 2, max = 50, message = "Name must be between 2 and 50 characters")
+    val name: String? = null,
+    
+    val status: UserStatus? = null
+)
+
+// 응답 DTO
+data class UserResponse(
+    val id: Long,
+    val name: String,
+    val email: String,
+    val status: String,
+    val createdAt: LocalDateTime,
+    val updatedAt: LocalDateTime
 ) {
     companion object {
-        fun <T> success(data: T, message: String? = null): ApiResponse<T> {
-            return ApiResponse(
-                success = true,
-                data = data,
-                message = message,
-                errors = null
-            )
-        }
-        
-        fun <T> failure(message: String, errors: List<String>? = null): ApiResponse<T> {
-            return ApiResponse(
-                success = false,
-                data = null,
-                message = message,
-                errors = errors
+        fun from(user: User): UserResponse {
+            return UserResponse(
+                id = user.id,
+                name = user.name,
+                email = user.email.toString(),
+                status = user.status.name,
+                createdAt = user.createdAt,
+                updatedAt = user.updatedAt
             )
         }
     }
 }
 ```
 
-### 예외 처리 가이드
-
-#### 커스텀 예외 정의
+**9. API 문서화 (OpenAPI/Swagger)**
 ```kotlin
-// 기본 비즈니스 예외
-abstract class BusinessException(
-    message: String,
-    val errorCode: String,
-    cause: Throwable? = null
-) : RuntimeException(message, cause)
-
-// 구체적인 예외들
-class EntityNotFoundException(message: String) : 
-    BusinessException(message, "ENTITY_NOT_FOUND")
-
-class ValidationException(val errors: List<String>) : 
-    BusinessException("Validation failed", "VALIDATION_ERROR")
-
-class DuplicateEntityException(message: String) : 
-    BusinessException(message, "DUPLICATE_ENTITY")
-```
-
-#### 글로벌 예외 처리
-```kotlin
-@ControllerAdvice
-class GlobalExceptionHandler {
+@RestController
+@RequestMapping("/api/v1/users")
+@Tag(name = "User", description = "사용자 관리 API")
+class UserController {
     
-    private val logger = LoggerFactory.getLogger(GlobalExceptionHandler::class.java)
-    
-    @ExceptionHandler(EntityNotFoundException::class)
-    @ResponseStatus(HttpStatus.NOT_FOUND)
-    fun handleEntityNotFoundException(ex: EntityNotFoundException): ApiResponse<Nothing> {
-        logger.warn("Entity not found: ${ex.message}")
-        return ApiResponse.failure(ex.message ?: "Entity not found")
-    }
-    
-    @ExceptionHandler(ValidationException::class)
-    @ResponseStatus(HttpStatus.BAD_REQUEST)
-    fun handleValidationException(ex: ValidationException): ApiResponse<Nothing> {
-        logger.warn("Validation error: ${ex.errors}")
-        return ApiResponse.failure("Validation failed", ex.errors)
-    }
-    
-    @ExceptionHandler(MethodArgumentNotValidException::class)
-    @ResponseStatus(HttpStatus.BAD_REQUEST)
-    fun handleMethodArgumentNotValid(ex: MethodArgumentNotValidException): ApiResponse<Nothing> {
-        val errors = ex.bindingResult.fieldErrors.map { "${it.field}: ${it.defaultMessage}" }
-        logger.warn("Validation error: $errors")
-        return ApiResponse.failure("Validation failed", errors)
-    }
-    
-    @ExceptionHandler(Exception::class)
-    @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
-    fun handleGenericException(ex: Exception): ApiResponse<Nothing> {
-        logger.error("Unexpected error occurred", ex)
-        return ApiResponse.failure("An unexpected error occurred")
-    }
-}
-```
-
-### 데이터베이스 및 JPA 가이드
-
-#### JPA Index 설정 가이드
-
-**@Table의 indexes 속성**
-```kotlin
-@Table(
-    name = "orders",
-    indexes = [
-        Index(name = "idx_user_id", columnList = "user_id"),
-        Index(name = "idx_created_at", columnList = "created_at"),
-        Index(name = "idx_status_created", columnList = "status, created_at")
-    ]
-)
-```
-
-**Index 설정 목적**:
-- **조회 성능 향상**: WHERE 절에서 자주 사용되는 컬럼에 인덱스 생성
-- **정렬 성능 향상**: ORDER BY 절에서 사용되는 컬럼에 인덱스 생성
-- **조인 성능 향상**: Foreign Key 컬럼에 인덱스 생성
-
-**Index 명명 규칙**:
-- 단일 컬럼: `idx_컬럼명`
-- 복합 컬럼: `idx_컬럼1_컬럼2`
-- 유니크 인덱스: `uk_컬럼명`
-
-**주의사항**:
-- 인덱스는 SELECT 성능을 향상시키지만 INSERT/UPDATE/DELETE 성능을 저하시킴
-- 필요한 인덱스만 생성 (과도한 인덱스는 오히려 성능 저하)
-- 복합 인덱스는 컬럼 순서가 중요 (선택도가 높은 컬럼을 앞에)
-
-#### Entity 매핑 베스트 프랙티스
-```kotlin
-@Entity
-@Table(
-    name = "orders",
-    indexes = [
-        Index(name = "idx_user_id", columnList = "user_id"),
-        Index(name = "idx_created_at", columnList = "created_at")
-    ]
-)
-class Order(
-    @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
-    val id: Long = 0,
-    
-    @ManyToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "user_id", nullable = false)
-    val user: User,
-    
-    @OneToMany(
-        mappedBy = "order", 
-        cascade = [CascadeType.ALL], 
-        orphanRemoval = true,
-        fetch = FetchType.LAZY
+    @Operation(
+        summary = "사용자 목록 조회",
+        description = "페이징, 필터링, 정렬이 가능한 사용자 목록을 조회합니다."
     )
-    val orderItems: MutableList<OrderItem> = mutableListOf(),
-    
-    @Enumerated(EnumType.STRING)
-    @Column(nullable = false)
-    val status: OrderStatus = OrderStatus.PENDING,
-    
-    @Column(name = "total_amount", nullable = false, precision = 10, scale = 2)
-    val totalAmount: BigDecimal,
-    
-    @CreationTimestamp
-    @Column(name = "created_at", nullable = false, updatable = false)
-    val createdAt: LocalDateTime = LocalDateTime.now(),
-    
-    @UpdateTimestamp
-    @Column(name = "updated_at", nullable = false)
-    val updatedAt: LocalDateTime = LocalDateTime.now()
-) {
-    fun addOrderItem(orderItem: OrderItem) {
-        orderItems.add(orderItem)
-        orderItem.order = this
-    }
-    
-    fun removeOrderItem(orderItem: OrderItem) {
-        orderItems.remove(orderItem)
-        orderItem.order = null
-    }
-}
-```
-
-#### 복잡한 쿼리 처리
-```kotlin
-@Repository
-interface OrderRepository : JpaRepository<Order, Long> {
-    
-    @Query("""
-        SELECT o FROM Order o
-        JOIN FETCH o.user u
-        WHERE o.status = :status
-        AND o.createdAt BETWEEN :startDate AND :endDate
-        ORDER BY o.createdAt DESC
-    """)
-    fun findOrdersByStatusAndDateRange(
-        status: OrderStatus,
-        startDate: LocalDateTime,
-        endDate: LocalDateTime,
-        pageable: Pageable
-    ): Page<Order>
-    
-    @Query("""
-        SELECT new com.company.dto.OrderSummary(
-            o.id, 
-            u.name, 
-            o.totalAmount, 
-            o.status, 
-            o.createdAt
-        )
-        FROM Order o
-        JOIN o.user u
-        WHERE u.id = :userId
-        ORDER BY o.createdAt DESC
-    """)
-    fun findOrderSummariesByUserId(
-        userId: Long,
-        pageable: Pageable
-    ): Page<OrderSummary>
-}
-```
-
-### 테스트 작성 가이드
-
-#### 단위 테스트
-```kotlin
-@ExtendWith(MockitoExtension::class)
-class UserApplicationServiceTest {
-    
-    @Mock
-    private lateinit var userRepository: UserRepository
-    
-    @Mock
-    private lateinit var userDomainService: UserDomainService
-    
-    @Mock
-    private lateinit var eventPublisher: ApplicationEventPublisher
-    
-    @InjectMocks
-    private lateinit var userApplicationService: UserApplicationService
-    
-    @Test
-    fun `should create user successfully`() {
-        // Given
-        val command = CreateUserCommand("John Doe", "john@example.com")
-        val user = User(name = command.name, email = Email(command.email))
-        val savedUser = user.copy(id = 1L)
+    @ApiResponses(value = [
+        ApiResponse(responseCode = "200", description = "조회 성공"),
+        ApiResponse(responseCode = "400", description = "잘못된 요청 파라미터")
+    ])
+    @GetMapping
+    fun getUsers(
+        @Parameter(description = "페이지 번호 (0부터 시작)", example = "0")
+        @RequestParam(defaultValue = "0") page: Int,
         
-        whenever(userDomainService.validateUserRegistration(any()))
-            .thenReturn(ValidationResult.success())
-        whenever(userRepository.save(any<User>()))
-            .thenReturn(savedUser)
-        
-        // When
-        val result = userApplicationService.createUser(command)
-        
-        // Then
-        assertThat(result.id).isEqualTo(1L)
-        assertThat(result.name).isEqualTo("John Doe")
-        assertThat(result.email).isEqualTo("john@example.com")
-        
-        verify(userRepository).save(any<User>())
-        verify(eventPublisher).publishEvent(any<UserCreatedEvent>())
-    }
-    
-    @Test
-    fun `should throw exception when user not found`() {
-        // Given
-        val userId = 999L
-        whenever(userRepository.findById(userId)).thenReturn(null)
-        
-        // When & Then
-        assertThatThrownBy { 
-            userApplicationService.getUserById(userId) 
-        }
-        .isInstanceOf(EntityNotFoundException::class.java)
-        .hasMessage("User not found with id: $userId")
-    }
-}
-```
-
-#### 통합 테스트
-```kotlin
-@SpringBootTest
-@TestPropertySource(locations = ["classpath:application-test.properties"])
-@Transactional
-class UserIntegrationTest {
-    
-    @Autowired
-    private lateinit var userApplicationService: UserApplicationService
-    
-    @Autowired
-    private lateinit var userRepository: UserRepository
-    
-    @Test
-    fun `should create and retrieve user`() {
-        // Given
-        val command = CreateUserCommand("Integration Test", "integration@test.com")
-        
-        // When
-        val createdUser = userApplicationService.createUser(command)
-        val retrievedUser = userApplicationService.getUserById(createdUser.id)
-        
-        // Then
-        assertThat(retrievedUser.name).isEqualTo("Integration Test")
-        assertThat(retrievedUser.email).isEqualTo("integration@test.com")
-        assertThat(retrievedUser.status).isEqualTo("ACTIVE")
-    }
-}
-```
-
-### 성능 최적화 가이드
-
-#### N+1 문제 해결
-```kotlin
-// ❌ N+1 문제 발생
-fun getBadOrders(): List<OrderResponse> {
-    return orderRepository.findAll().map { order ->
-        OrderResponse(
-            id = order.id,
-            userName = order.user.name, // 지연 로딩으로 N+1 발생
-            itemCount = order.orderItems.size // 지연 로딩으로 N+1 발생
-        )
-    }
-}
-
-// ✅ Fetch Join으로 해결
-@Query("""
-    SELECT DISTINCT o FROM Order o
-    JOIN FETCH o.user
-    JOIN FETCH o.orderItems
-""")
-fun findAllWithUserAndItems(): List<Order>
-
-// ✅ EntityGraph 사용
-@EntityGraph(attributePaths = ["user", "orderItems"])
-fun findAllWithGraph(): List<Order>
-```
-
-#### 캐싱 활용
-```kotlin
-@Service
-class UserApplicationService {
-    
-    @Cacheable(value = ["users"], key = "#id")
-    fun getUserById(id: Long): UserResponse {
+        @Parameter(description = "페이지 크기", example = "20")
+        @RequestParam(defaultValue = "20") size: Int
+    ): ResponseEntity<ApiResponse<Page<UserResponse>>> {
         // 구현
     }
-    
-    @CacheEvict(value = ["users"], key = "#result.id")
-    fun updateUser(command: UpdateUserCommand): UserResponse {
-        // 구현
-    }
-    
-    @CacheEvict(value = ["users"], allEntries = true)
-    fun clearUserCache() {
-        // 캐시 전체 삭제
-    }
 }
 ```
+
+#### Spring Validation 어노테이션 설명
+
+// ... existing code ...
 
 ## 테스트 가이드라인
 
