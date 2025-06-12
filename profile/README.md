@@ -157,8 +157,15 @@ Fixes #이슈번호
 ## 코딩 컨벤션
 
 ### 일반 규칙
+#### 백엔드 (Kotlin)
+- 들여쓰기는 4칸 공백 사용 (Kotlin 공식 컨벤션)
+- 세미콜론 생략 권장 (Kotlin에서는 선택사항)
+- 변수명은 camelCase 사용
+- 상수는 UPPER_SNAKE_CASE 사용
+
+#### 프론트엔드 (JavaScript/React)
 - 들여쓰기는 2칸 공백 사용
-- 세미콜론 사용 필수
+- 세미콜론 사용 권장 (ESLint 설정에 따라)
 - 변수명은 camelCase 사용
 - 상수는 UPPER_SNAKE_CASE 사용
 
@@ -242,37 +249,77 @@ if (user != null) {
 
 ### DDD 구현 가이드
 
+#### Entity 설계 주요 원칙
+
+**val vs var 선택**:
+- **var**: 변경 가능한 속성 (대부분의 Entity 필드)
+- **val**: 불변 속성 (ID, createdAt 등 생성 후 변경되지 않는 필드)
+
+**data class vs class**:
+- **class 권장**: Entity는 비즈니스 로직을 포함하므로 일반 class 사용
+- **data class 지양**: equals/hashCode가 모든 필드를 기준으로 생성되어 문제 발생 가능
+
+**JPA 기본 생성자**:
+- JPA는 리플렉션을 통해 기본 생성자로 객체를 생성
+- Kotlin에서는 명시적으로 기본 생성자 제공 필요
+
 #### 1. Domain Model (엔티티/값 객체)
 ```kotlin
 // Entity 예제
 @Entity
 @Table(name = "users")
-data class User(
+class User(
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
-    val id: Long = 0,
+    var id: Long = 0,
     
     @Column(nullable = false)
-    val name: String,
+    var name: String,
     
     @Column(nullable = false, unique = true)
-    val email: Email,
+    var email: Email,
     
     @Enumerated(EnumType.STRING)
-    val status: UserStatus = UserStatus.ACTIVE,
+    var status: UserStatus = UserStatus.ACTIVE,
     
     @CreationTimestamp
-    val createdAt: LocalDateTime = LocalDateTime.now()
+    @Column(name = "created_at", nullable = false, updatable = false)
+    val createdAt: LocalDateTime = LocalDateTime.now(),
+    
+    @UpdateTimestamp
+    @Column(name = "updated_at", nullable = false)
+    var updatedAt: LocalDateTime = LocalDateTime.now()
 ) {
+    // JPA 기본 생성자
+    constructor() : this(0, "", Email(""), UserStatus.ACTIVE)
+    
     fun activate() {
-        // 도메인 로직
+        status = UserStatus.ACTIVE
+        updatedAt = LocalDateTime.now()
     }
     
     fun deactivate() {
-        // 도메인 로직
+        status = UserStatus.INACTIVE
+        updatedAt = LocalDateTime.now()
+    }
+    
+    fun updateName(newName: String) {
+        require(newName.isNotBlank()) { "Name cannot be blank" }
+        name = newName
+        updatedAt = LocalDateTime.now()
     }
     
     fun flagActive(): Boolean = status == UserStatus.ACTIVE
+    
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is User) return false
+        return id == other.id
+    }
+    
+    override fun hashCode(): Int = id.hashCode()
+    
+    override fun toString(): String = "User(id=$id, name='$name', email=$email, status=$status)"
 }
 
 // Value Object 예제
@@ -618,6 +665,35 @@ class GlobalExceptionHandler {
 ```
 
 ### 데이터베이스 및 JPA 가이드
+
+#### JPA Index 설정 가이드
+
+**@Table의 indexes 속성**
+```kotlin
+@Table(
+    name = "orders",
+    indexes = [
+        Index(name = "idx_user_id", columnList = "user_id"),
+        Index(name = "idx_created_at", columnList = "created_at"),
+        Index(name = "idx_status_created", columnList = "status, created_at")
+    ]
+)
+```
+
+**Index 설정 목적**:
+- **조회 성능 향상**: WHERE 절에서 자주 사용되는 컬럼에 인덱스 생성
+- **정렬 성능 향상**: ORDER BY 절에서 사용되는 컬럼에 인덱스 생성
+- **조인 성능 향상**: Foreign Key 컬럼에 인덱스 생성
+
+**Index 명명 규칙**:
+- 단일 컬럼: `idx_컬럼명`
+- 복합 컬럼: `idx_컬럼1_컬럼2`
+- 유니크 인덱스: `uk_컬럼명`
+
+**주의사항**:
+- 인덱스는 SELECT 성능을 향상시키지만 INSERT/UPDATE/DELETE 성능을 저하시킴
+- 필요한 인덱스만 생성 (과도한 인덱스는 오히려 성능 저하)
+- 복합 인덱스는 컬럼 순서가 중요 (선택도가 높은 컬럼을 앞에)
 
 #### Entity 매핑 베스트 프랙티스
 ```kotlin
