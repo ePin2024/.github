@@ -1,4 +1,4 @@
-# 사내 개발 가이드
+# 에잇핀 개발 가이드
 
 ## 📋 목차
 - [개요](#개요)
@@ -2129,15 +2129,15 @@ const UserCard: React.FC<UserCardProps> = ({ user, onEdit, onDelete }) => {
 
 #### 테스트 피라미드
 ```
-        /\
-       /  \
-      / E2E \     <- 소수의 핵심 플로우
-     /______\
-    /        \
-   / 통합 테스트 \   <- 주요 모듈 연동
-  /____________\
- /              \
-/   단위 테스트    \  <- 대부분의 테스트
+         /\
+        /  \
+       /E2E \     <- 소수의 핵심 플로우
+      /______\
+     /        \
+    / 통합 테스트 \   <- 주요 모듈 연동
+   /____________\
+  /              \
+ /    단위 테스트    \  <- 대부분의 테스트
 /__________________\
 ```
 
@@ -3005,7 +3005,7 @@ npm run test:coverage
 ----------------------|---------|----------|---------|---------|
 File                  | % Stmts | % Branch | % Funcs | % Lines |
 ----------------------|---------|----------|---------|---------|
-All files            |   88.89 |     87.5 |     100 |   88.24 |
+All files             |   88.89 |     87.5 |     100 |   88.24 |
  src/components       |   91.67 |     87.5 |     100 |   90.91 |
   UserCard.jsx        |   91.67 |     87.5 |     100 |   90.91 |
  src/hooks            |   85.71 |       75 |     100 |   85.71 |
@@ -3105,24 +3105,978 @@ jobs:
         uses: codecov/codecov-action@v3
 ```
 
-이제 **완전한 테스트 가이드라인**이 완성되었습니다! 🧪✨
+## 배포 프로세스 (Docker 기반)
 
-## 배포 프로세스
+### Docker 컨테이너화 전략
 
-### 개발 환경 배포
-```bash
-npm run deploy:dev
+#### 멀티 스테이지 빌드 아키텍처
+```
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│   Build Stage   │───▶│  Runtime Stage  │───▶│  Production     │
+│                 │    │                 │    │  Container      │
+│ • 의존성 설치    │    │ • 최소 런타임    │    │ • 최적화된 이미지│
+│ • 코드 빌드      │    │ • 보안 강화      │    │ • 자동 배포      │
+│ • 테스트 실행    │    │ • 성능 최적화    │    │ • 헬스 체크      │
+└─────────────────┘    └─────────────────┘    └─────────────────┘
 ```
 
-### 프로덕션 배포
-1. `develop` 브랜치를 `main`으로 병합
-2. 태그 생성: `git tag v1.0.0`
-3. 자동 배포 트리거 또는 수동 배포 실행
+### 백엔드 Dockerfile 구성
 
-### 환경별 설정
-- **개발**: `config/dev.json`
-- **스테이징**: `config/staging.json`
-- **프로덕션**: `config/prod.json`
+#### 1. Spring Boot 애플리케이션 Dockerfile
+```dockerfile
+# backend/Dockerfile
+FROM openjdk:17-jdk-slim as builder
+
+# 작업 디렉토리 설정
+WORKDIR /app
+
+# Gradle Wrapper와 의존성 파일 복사 (캐시 최적화)
+COPY gradlew .
+COPY gradle gradle
+COPY build.gradle.kts .
+COPY settings.gradle.kts .
+
+# 의존성 다운로드 (Docker 레이어 캐싱 활용)
+RUN chmod +x ./gradlew
+RUN ./gradlew dependencies --no-daemon
+
+# 소스 코드 복사
+COPY src src
+
+# 애플리케이션 빌드
+RUN ./gradlew bootJar --no-daemon
+
+# 런타임 스테이지
+FROM openjdk:17-jre-slim
+
+# 보안 및 성능을 위한 사용자 생성
+RUN groupadd -r appgroup && useradd -r -g appgroup appuser
+
+# 작업 디렉토리 설정
+WORKDIR /app
+
+# 빌드된 JAR 파일 복사
+COPY --from=builder /app/build/libs/*.jar app.jar
+
+# 사용자 권한 설정
+RUN chown appuser:appgroup app.jar
+USER appuser
+
+# 포트 노출
+EXPOSE 8080
+
+# 헬스 체크 설정
+HEALTHCHECK --interval=30s --timeout=3s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8080/actuator/health || exit 1
+
+# JVM 최적화 및 애플리케이션 실행
+ENTRYPOINT ["java", \
+    "-Djava.security.egd=file:/dev/./urandom", \
+    "-XX:+UseG1GC", \
+    "-XX:+UseContainerSupport", \
+    "-XX:MaxRAMPercentage=75.0", \
+    "-Dspring.profiles.active=${SPRING_PROFILES_ACTIVE:prod}", \
+    "-jar", "app.jar"]
+```
+
+#### 2. 환경별 설정 파일
+```yaml
+# backend/src/main/resources/application-prod.yml
+spring:
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:appdb}
+    username: ${DB_USERNAME:app}
+    password: ${DB_PASSWORD}
+    hikari:
+      maximum-pool-size: 20
+      minimum-idle: 5
+      connection-timeout: 30000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: false
+
+  redis:
+    host: ${REDIS_HOST:localhost}
+    port: ${REDIS_PORT:6379}
+    password: ${REDIS_PASSWORD:}
+    timeout: 2000ms
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: when-authorized
+
+logging:
+  level:
+    com.company: INFO
+    org.springframework.security: WARN
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} - %msg%n"
+  file:
+    name: /app/logs/application.log
+
+server:
+  port: 8080
+  shutdown: graceful
+  tomcat:
+    max-threads: 200
+    min-spare-threads: 10
+```
+
+### 프론트엔드 Dockerfile 구성
+
+#### 1. React.js 애플리케이션 Dockerfile
+```dockerfile
+# frontend/Dockerfile
+FROM node:18-alpine as builder
+
+# 작업 디렉토리 설정
+WORKDIR /app
+
+# package.json과 package-lock.json 복사 (캐시 최적화)
+COPY package*.json ./
+
+# 의존성 설치
+RUN npm ci --only=production
+
+# 소스 코드 복사
+COPY . .
+
+# 빌드 인수 설정
+ARG REACT_APP_API_BASE_URL
+ARG REACT_APP_ENV
+
+# 환경 변수 설정
+ENV REACT_APP_API_BASE_URL=$REACT_APP_API_BASE_URL
+ENV REACT_APP_ENV=$REACT_APP_ENV
+
+# 애플리케이션 빌드
+RUN npm run build
+
+# Nginx 런타임 스테이지
+FROM nginx:alpine
+
+# Nginx 설정 복사
+COPY nginx.conf /etc/nginx/nginx.conf
+
+# 빌드된 정적 파일 복사
+COPY --from=builder /app/build /usr/share/nginx/html
+
+# 포트 노출
+EXPOSE 80
+
+# 헬스 체크 설정
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://localhost/ || exit 1
+
+# Nginx 실행
+CMD ["nginx", "-g", "daemon off;"]
+```
+
+#### 2. Nginx 설정 파일
+```nginx
+# frontend/nginx.conf
+events {
+    worker_connections 1024;
+}
+
+http {
+    include       /etc/nginx/mime.types;
+    default_type  application/octet-stream;
+
+    # 로그 형식 설정
+    log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                   '$status $body_bytes_sent "$http_referer" '
+                   '"$http_user_agent" "$http_x_forwarded_for"';
+
+    access_log /var/log/nginx/access.log main;
+    error_log /var/log/nginx/error.log warn;
+
+    # 성능 최적화
+    sendfile on;
+    tcp_nopush on;
+    tcp_nodelay on;
+    keepalive_timeout 65;
+    types_hash_max_size 2048;
+
+    # Gzip 압축 설정
+    gzip on;
+    gzip_vary on;
+    gzip_min_length 1024;
+    gzip_proxied any;
+    gzip_comp_level 6;
+    gzip_types
+        text/plain
+        text/css
+        text/xml
+        text/javascript
+        application/javascript
+        application/xml+rss
+        application/json;
+
+    server {
+        listen 80;
+        server_name localhost;
+        root /usr/share/nginx/html;
+        index index.html;
+
+        # 보안 헤더 설정
+        add_header X-Frame-Options "SAMEORIGIN" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-XSS-Protection "1; mode=block" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+        # React Router 지원을 위한 설정
+        location / {
+            try_files $uri $uri/ /index.html;
+        }
+
+        # 정적 자산 캐시 설정
+        location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+            expires 1y;
+            add_header Cache-Control "public, immutable";
+        }
+
+        # API 프록시 설정
+        location /api/ {
+            proxy_pass http://backend:8080;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
+        # 헬스 체크 엔드포인트
+        location /health {
+            access_log off;
+            return 200 "healthy\n";
+            add_header Content-Type text/plain;
+        }
+    }
+}
+```
+
+### Docker Compose 구성
+
+#### 1. 개발 환경 (docker-compose.dev.yml)
+```yaml
+version: '3.8'
+
+services:
+  # 데이터베이스
+  postgres:
+    image: postgres:15-alpine
+    container_name: app-postgres-dev
+    environment:
+      POSTGRES_DB: appdb_dev
+      POSTGRES_USER: app_dev
+      POSTGRES_PASSWORD: dev_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_dev_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - app-network
+
+  # Redis
+  redis:
+    image: redis:7-alpine
+    container_name: app-redis-dev
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_dev_data:/data
+    networks:
+      - app-network
+
+  # 백엔드
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: app-backend-dev
+    environment:
+      SPRING_PROFILES_ACTIVE: dev
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: appdb_dev
+      DB_USERNAME: app_dev
+      DB_PASSWORD: dev_password
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    ports:
+      - "8080:8080"
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./backend/logs:/app/logs
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  # 프론트엔드
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        REACT_APP_API_BASE_URL: http://localhost:8080
+        REACT_APP_ENV: development
+    container_name: app-frontend-dev
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    networks:
+      - app-network
+    restart: unless-stopped
+
+volumes:
+  postgres_dev_data:
+  redis_dev_data:
+
+networks:
+  app-network:
+    driver: bridge
+```
+
+#### 2. 프로덕션 환경 (docker-compose.prod.yml)
+```yaml
+version: '3.8'
+
+services:
+  # 데이터베이스
+  postgres:
+    image: postgres:15-alpine
+    container_name: app-postgres-prod
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USERNAME}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres_prod_data:/var/lib/postgresql/data
+      - ./database/backup:/backup
+    networks:
+      - app-network
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '0.5'
+
+  # Redis
+  redis:
+    image: redis:7-alpine
+    container_name: app-redis-prod
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    volumes:
+      - redis_prod_data:/data
+    networks:
+      - app-network
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.25'
+
+  # 백엔드
+  backend:
+    image: ${DOCKER_REGISTRY}/app-backend:${VERSION}
+    container_name: app-backend-prod
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME}
+      DB_USERNAME: ${DB_USERNAME}
+      DB_PASSWORD: ${DB_PASSWORD}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - app-network
+    restart: always
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1'
+
+  # 프론트엔드
+  frontend:
+    image: ${DOCKER_REGISTRY}/app-frontend:${VERSION}
+    container_name: app-frontend-prod
+    depends_on:
+      - backend
+    networks:
+      - app-network
+    restart: always
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+
+  # 로드 밸런서 (Nginx)
+  nginx:
+    image: nginx:alpine
+    container_name: app-nginx-prod
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./nginx/ssl:/etc/nginx/ssl
+      - ./logs/nginx:/var/log/nginx
+    depends_on:
+      - frontend
+      - backend
+    networks:
+      - app-network
+    restart: always
+
+volumes:
+  postgres_prod_data:
+  redis_prod_data:
+
+networks:
+  app-network:
+    driver: bridge
+```
+
+### CI/CD 파이프라인 구성
+
+#### 1. GitHub Actions 워크플로우
+```yaml
+# .github/workflows/deploy.yml
+name: Build and Deploy
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  DOCKER_REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v3
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      - name: Run backend tests
+        run: |
+          cd backend
+          ./gradlew test jacocoTestReport
+
+      - name: Run frontend tests
+        run: |
+          cd frontend
+          npm ci
+          npm run test:ci
+
+      - name: Upload coverage reports
+        uses: codecov/codecov-action@v3
+        with:
+          files: backend/build/reports/jacoco/test/jacocoTestReport.xml,frontend/coverage/lcov.info
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Generate version
+        id: version
+        run: |
+          if [[ ${{ github.ref }} == 'refs/heads/main' ]]; then
+            VERSION=$(date +%Y%m%d)-$(echo ${{ github.sha }} | cut -c1-7)
+          else
+            VERSION=$(date +%Y%m%d)-$(echo ${{ github.sha }} | cut -c1-7)-dev
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.DOCKER_REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push backend image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: true
+          tags: |
+            ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}-backend:${{ steps.version.outputs.version }}
+            ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}-backend:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push frontend image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: true
+          build-args: |
+            REACT_APP_API_BASE_URL=${{ secrets.API_BASE_URL }}
+            REACT_APP_ENV=production
+          tags: |
+            ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:${{ steps.version.outputs.version }}
+            ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy-staging:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/develop'
+    environment: staging
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to staging
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.STAGING_HOST }}
+          username: ${{ secrets.STAGING_USER }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          script: |
+            cd /opt/app
+            export VERSION=${{ needs.build.outputs.version }}
+            export DOCKER_REGISTRY=${{ env.DOCKER_REGISTRY }}
+            export IMAGE_NAME=${{ env.IMAGE_NAME }}
+            
+            # 환경 변수 로드
+            source .env.staging
+            
+            # 새 이미지 풀
+            docker-compose -f docker-compose.staging.yml pull
+            
+            # 무중단 배포
+            docker-compose -f docker-compose.staging.yml up -d
+            
+            # 헬스 체크
+            for i in {1..10}; do
+              if curl -f http://localhost/health; then
+                echo "Health check passed"
+                break
+              fi
+              echo "Health check failed, retrying in 10s..."
+              sleep 10
+            done
+
+  deploy-production:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    environment: production
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to production
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.PROD_HOST }}
+          username: ${{ secrets.PROD_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          script: |
+            cd /opt/app
+            export VERSION=${{ needs.build.outputs.version }}
+            export DOCKER_REGISTRY=${{ env.DOCKER_REGISTRY }}
+            export IMAGE_NAME=${{ env.IMAGE_NAME }}
+            
+            # 환경 변수 로드
+            source .env.production
+            
+            # 데이터베이스 백업
+            docker exec app-postgres-prod pg_dump -U $DB_USERNAME $DB_NAME > backup-$(date +%Y%m%d-%H%M%S).sql
+            
+            # 새 이미지 풀
+            docker-compose -f docker-compose.prod.yml pull
+            
+            # 블루-그린 배포
+            docker-compose -f docker-compose.prod.yml up -d --scale backend=4
+            sleep 30
+            docker-compose -f docker-compose.prod.yml up -d --scale backend=2
+            
+            # 헬스 체크
+            for i in {1..15}; do
+              if curl -f https://app.company.com/health; then
+                echo "Production health check passed"
+                break
+              fi
+              echo "Health check failed, retrying in 15s..."
+              sleep 15
+            done
+            
+            # 오래된 이미지 정리
+            docker image prune -f
+
+  notify:
+    needs: [deploy-staging, deploy-production]
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+      - name: Notify Slack
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          channel: '#deployments'
+          webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+```
+
+### 배포 명령어 및 스크립트
+
+#### 1. 로컬 개발 환경 실행
+```bash
+# 전체 스택 실행
+docker-compose -f docker-compose.dev.yml up -d
+
+# 로그 확인
+docker-compose -f docker-compose.dev.yml logs -f
+
+# 특정 서비스만 재시작
+docker-compose -f docker-compose.dev.yml restart backend
+
+# 개발 환경 종료
+docker-compose -f docker-compose.dev.yml down
+```
+
+#### 2. 프로덕션 배포 스크립트
+```bash
+#!/bin/bash
+# deploy.sh
+
+set -e
+
+# 환경 변수 설정
+source .env.production
+
+# 버전 정보
+VERSION=${1:-$(date +%Y%m%d)-$(git rev-parse --short HEAD)}
+echo "Deploying version: $VERSION"
+
+# 이미지 빌드
+echo "Building images..."
+docker build -t $DOCKER_REGISTRY/app-backend:$VERSION ./backend
+docker build -t $DOCKER_REGISTRY/app-frontend:$VERSION ./frontend
+
+# 이미지 푸시
+echo "Pushing images to registry..."
+docker push $DOCKER_REGISTRY/app-backend:$VERSION
+docker push $DOCKER_REGISTRY/app-frontend:$VERSION
+
+# 배포
+echo "Deploying to production..."
+export VERSION=$VERSION
+docker-compose -f docker-compose.prod.yml pull
+docker-compose -f docker-compose.prod.yml up -d
+
+# 헬스 체크
+echo "Performing health check..."
+for i in {1..10}; do
+    if curl -f http://localhost/health; then
+        echo "✅ Deployment successful!"
+        exit 0
+    fi
+    echo "⏳ Waiting for application to start..."
+    sleep 10
+done
+
+echo "❌ Deployment failed - health check timeout"
+exit 1
+```
+
+#### 3. 롤백 스크립트
+```bash
+#!/bin/bash
+# rollback.sh
+
+set -e
+
+PREVIOUS_VERSION=${1:-"latest"}
+
+echo "Rolling back to version: $PREVIOUS_VERSION"
+
+# 이전 버전으로 롤백
+export VERSION=$PREVIOUS_VERSION
+docker-compose -f docker-compose.prod.yml pull
+docker-compose -f docker-compose.prod.yml up -d
+
+# 헬스 체크
+for i in {1..10}; do
+    if curl -f http://localhost/health; then
+        echo "✅ Rollback successful!"
+        exit 0
+    fi
+    sleep 10
+done
+
+echo "❌ Rollback failed"
+exit 1
+```
+
+### 모니터링 및 로깅
+
+#### 1. 로그 수집 설정
+```yaml
+# docker-compose.logging.yml
+version: '3.8'
+
+services:
+  # ELK Stack for 로그 수집
+  elasticsearch:
+    image: elasticsearch:8.8.0
+    environment:
+      - discovery.type=single-node
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+
+  logstash:
+    image: logstash:8.8.0
+    volumes:
+      - ./logstash/pipeline:/usr/share/logstash/pipeline
+    depends_on:
+      - elasticsearch
+
+  kibana:
+    image: kibana:8.8.0
+    ports:
+      - "5601:5601"
+    depends_on:
+      - elasticsearch
+
+  # Prometheus for 메트릭 수집
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+
+  # Grafana for 대시보드
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+
+volumes:
+  elasticsearch_data:
+  grafana_data:
+```
+
+#### 2. 백업 및 복구 전략
+```bash
+#!/bin/bash
+# backup.sh
+
+# 데이터베이스 백업
+docker exec app-postgres-prod pg_dump -U $DB_USERNAME $DB_NAME | gzip > "backup-$(date +%Y%m%d-%H%M%S).sql.gz"
+
+# Redis 백업
+docker exec app-redis-prod redis-cli BGSAVE
+
+# 백업 파일 S3 업로드 (선택사항)
+aws s3 cp backup-*.sql.gz s3://app-backups/database/
+
+# 7일 이상된 백업 파일 삭제
+find ./backup -name "backup-*.sql.gz" -mtime +7 -delete
+
+echo "✅ Backup completed successfully"
+```
+
+### 보안 및 환경 변수 관리
+
+#### 1. 환경 변수 파일 템플릿
+```bash
+# .env.production.template
+# 데이터베이스 설정
+DB_HOST=postgres
+DB_PORT=5432
+DB_NAME=appdb_prod
+DB_USERNAME=app_prod
+DB_PASSWORD=<strong_password>
+
+# Redis 설정
+REDIS_HOST=redis
+REDIS_PORT=6379
+REDIS_PASSWORD=<redis_password>
+
+# Docker Registry
+DOCKER_REGISTRY=ghcr.io/company
+VERSION=latest
+
+# SSL 인증서 (Let's Encrypt)
+SSL_EMAIL=admin@company.com
+DOMAIN=app.company.com
+
+# 모니터링
+GRAFANA_ADMIN_PASSWORD=<grafana_password>
+
+# JWT 시크릿
+JWT_SECRET=<jwt_secret_key>
+
+# 외부 API 키
+MAIL_API_KEY=<sendgrid_api_key>
+SLACK_WEBHOOK_URL=<slack_webhook>
+```
+
+#### 2. Docker Secrets 사용 (Docker Swarm)
+```yaml
+# docker-compose.swarm.yml
+version: '3.8'
+
+services:
+  backend:
+    image: app-backend:latest
+    secrets:
+      - db_password
+      - jwt_secret
+    environment:
+      DB_PASSWORD_FILE: /run/secrets/db_password
+      JWT_SECRET_FILE: /run/secrets/jwt_secret
+
+secrets:
+  db_password:
+    external: true
+  jwt_secret:
+    external: true
+```
+
+### 성능 최적화 및 스케일링
+
+#### 1. 수평 스케일링 설정
+```bash
+# 백엔드 서비스 스케일 업
+docker-compose -f docker-compose.prod.yml up -d --scale backend=4
+
+# 로드 밸런서 설정 확인
+docker-compose -f docker-compose.prod.yml exec nginx nginx -t
+
+# 서비스 상태 확인
+docker-compose -f docker-compose.prod.yml ps
+```
+
+#### 2. 리소스 제한 및 모니터링
+```yaml
+# docker-compose.yml에서 리소스 제한
+services:
+  backend:
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+        reservations:
+          memory: 1G
+          cpus: '0.5'
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+```
+
+### 환경별 배포 전략
+
+#### 1. 개발 환경 배포
+```bash
+# 개발 환경 시작
+docker-compose -f docker-compose.dev.yml up -d
+
+# 코드 변경 시 핫 리로드 (개발 중)
+docker-compose -f docker-compose.dev.yml restart backend frontend
+
+# 로그 모니터링
+docker-compose -f docker-compose.dev.yml logs -f backend
+```
+
+#### 2. 스테이징 환경 배포
+```bash
+# 스테이징 배포 (자동화된 테스트 포함)
+./scripts/deploy-staging.sh
+
+# 통합 테스트 실행
+docker-compose -f docker-compose.staging.yml exec backend ./gradlew integrationTest
+
+# E2E 테스트 실행
+docker-compose -f docker-compose.staging.yml exec frontend npm run test:e2e
+```
+
+#### 3. 프로덕션 환경 배포
+```bash
+# 프로덕션 배포 (승인 후)
+./scripts/deploy-production.sh v1.2.3
+
+# 헬스 체크 및 모니터링
+./scripts/health-check.sh
+
+# 트래픽 모니터링
+docker-compose -f docker-compose.prod.yml exec nginx tail -f /var/log/nginx/access.log
+```
+
+이제 **완전한 Docker 기반 배포 프로세스**가 완성되었습니다! 🐳✨
 
 ## 문제 해결
 
