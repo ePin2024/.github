@@ -382,8 +382,54 @@ class UserDomainService(
 }
 ```
 
-#### 3. Repository Interface (Domain)
+#### 3. Repository 패턴 구현
+
+Spring Boot와 JPA를 사용할 때 Repository 패턴은 **두 가지 접근 방식**으로 구현할 수 있습니다:
+
+##### **A. Simple 접근법 (권장 - 일반적인 프로젝트)**
+
+대부분의 Spring Boot 프로젝트에서는 이 방법이 더 간단하고 실용적입니다.
+
 ```kotlin
+@Repository
+interface UserRepository : JpaRepository<User, Long> {
+    // 기본 CRUD는 JpaRepository에서 제공
+    // 커스텀 메서드만 추가
+    fun findByEmail(email: Email): User?
+    fun existsByEmail(email: Email): Boolean
+    fun findByStatus(status: UserStatus): List<User>
+    fun findByStatusAndCreatedAtAfter(status: UserStatus, createdAt: LocalDateTime): List<User>
+    
+    // 페이징 지원
+    fun findByStatus(status: UserStatus, pageable: Pageable): Page<User>
+    
+    // 쿼리 메서드
+    @Query("SELECT u FROM User u WHERE u.name LIKE %:name%")
+    fun findByNameContaining(@Param("name") name: String): List<User>
+    
+    // Native Query 사용
+    @Query(value = "SELECT * FROM users WHERE created_at > :date", nativeQuery = true)
+    fun findUsersCreatedAfter(@Param("date") date: LocalDateTime): List<User>
+}
+```
+
+**장점:**
+- 간단하고 직관적
+- Spring Data JPA의 모든 기능 활용 가능
+- 보일러플레이트 코드 최소화
+- 개발 속도 향상
+
+**단점:**
+- Domain과 Infrastructure 계층이 결합
+- 완전한 DDD/Clean Architecture는 아님
+
+##### **B. DDD Clean Architecture 접근법 (엄격한 계층 분리 필요시)**
+
+Domain과 Infrastructure를 완전히 분리하는 방법입니다.
+
+**Domain Layer (Interface)**
+```kotlin
+// domain/repository/UserRepository.kt
 interface UserRepository {
     fun save(user: User): User
     fun findById(id: Long): User?
@@ -391,49 +437,96 @@ interface UserRepository {
     fun existsByEmail(email: Email): Boolean
     fun findAll(pageable: Pageable): Page<User>
     fun delete(user: User)
+    fun findByStatus(status: UserStatus): List<User>
 }
 ```
 
-#### 4. Repository Implementation (Infrastructure)
+**Infrastructure Layer (Implementation)**
 ```kotlin
+// infrastructure/persistence/JpaUserRepository.kt
 @Repository
 class JpaUserRepository(
     private val jpaRepository: UserJpaRepository
 ) : UserRepository {
     
-    override fun save(user: User): User {
-        return jpaRepository.save(user)
-    }
+    override fun save(user: User): User = jpaRepository.save(user)
     
-    override fun findById(id: Long): User? {
-        return jpaRepository.findById(id).orElse(null)
-    }
+    override fun findById(id: Long): User? = jpaRepository.findById(id).orElse(null)
     
-    override fun findByEmail(email: Email): User? {
-        return jpaRepository.findByEmail(email.toString())
-    }
+    override fun findByEmail(email: Email): User? = jpaRepository.findByEmail(email.toString())
     
-    override fun existsByEmail(email: Email): Boolean {
-        return jpaRepository.existsByEmail(email.toString())
-    }
+    override fun existsByEmail(email: Email): Boolean = jpaRepository.existsByEmail(email.toString())
     
-    override fun findAll(pageable: Pageable): Page<User> {
-        return jpaRepository.findAll(pageable)
-    }
+    override fun findAll(pageable: Pageable): Page<User> = jpaRepository.findAll(pageable)
     
-    override fun delete(user: User) {
-        jpaRepository.delete(user)
-    }
+    override fun delete(user: User) = jpaRepository.delete(user)
+    
+    override fun findByStatus(status: UserStatus): List<User> = jpaRepository.findByStatus(status)
 }
 
+// JPA Repository (Infrastructure 내부)
 @Repository
 interface UserJpaRepository : JpaRepository<User, Long> {
     fun findByEmail(email: String): User?
     fun existsByEmail(email: String): Boolean
+    fun findByStatus(status: UserStatus): List<User>
 }
 ```
 
-#### 5. Application Service
+**장점:**
+- 완전한 계층 분리 (Domain ↔ Infrastructure 독립성)
+- 테스트 시 Mock 구현체 쉽게 교체 가능
+- 다른 데이터 저장소로 교체 용이 (JPA → MongoDB 등)
+- DDD/Clean Architecture 원칙 준수
+
+**단점:**
+- 보일러플레이트 코드 증가
+- 개발 복잡도 상승
+- 작은 프로젝트에서는 과도한 설계
+
+##### **언제 어떤 방법을 사용할까?**
+
+| 상황 | 권장 방법 | 이유 |
+|------|-----------|------|
+| **일반적인 웹 애플리케이션** | Simple 접근법 | 개발 속도와 단순성 우선 |
+| **소규모 팀/프로젝트** | Simple 접근법 | 오버엔지니어링 방지 |
+| **대규모 엔터프라이즈** | DDD 접근법 | 계층 분리와 유지보수성 중요 |
+| **마이크로서비스** | DDD 접근법 | 독립성과 테스트 가능성 중요 |
+| **테스트 커버리지 중요** | DDD 접근법 | Mock 기반 유닛 테스트 용이 |
+| **빠른 프로토타이핑** | Simple 접근법 | 빠른 개발과 검증 |
+
+##### **혼합 접근법 (Pragmatic)**
+
+실무에서는 두 방법을 혼합해서 사용하기도 합니다:
+
+```kotlin
+// 기본적으로는 Simple 접근법 사용
+@Repository
+interface UserRepository : JpaRepository<User, Long> {
+    fun findByEmail(email: Email): User?
+    fun existsByEmail(email: Email): Boolean
+}
+
+// 복잡한 로직이나 외부 의존성이 있는 경우만 별도 구현
+@Repository
+interface UserRepositoryCustom {
+    fun findUsersWithComplexLogic(criteria: SearchCriteria): List<User>
+    fun performBulkOperation(userIds: List<Long>): Int
+}
+
+@Repository
+class UserRepositoryCustomImpl(
+    private val mongoTemplate: MongoTemplate,
+    private val redisTemplate: RedisTemplate<String, Any>
+) : UserRepositoryCustom {
+    // 복잡한 구현
+}
+
+// 최종 Repository는 둘 다 상속
+interface UserRepository : JpaRepository<User, Long>, UserRepositoryCustom
+```
+
+#### 4. Application Service
 ```kotlin
 @Service
 @Transactional(readOnly = true)
@@ -479,7 +572,7 @@ class UserApplicationService(
 }
 ```
 
-#### 6. DTO 및 Command/Query 객체
+#### 5. DTO 및 Command/Query 객체
 ```kotlin
 // Command 객체
 data class CreateUserCommand(
