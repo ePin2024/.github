@@ -2123,18 +2123,351 @@ const UserCard: React.FC<UserCardProps> = ({ user, onEdit, onDelete }) => {
 };
 ```
 
-이제 **완전한 React.js 프론트엔드 개발 가이드**가 완성되었습니다! 🎉
-
 ## 테스트 가이드라인
 
-### 테스트 종류
-- **단위 테스트**: 개별 함수/컴포넌트 테스트
-- **통합 테스트**: 여러 모듈 간의 상호작용 테스트
-- **E2E 테스트**: 전체 애플리케이션 플로우 테스트
+### 테스트 전략 및 종류
 
-### 테스트 실행
+#### 테스트 피라미드
+```
+        /\
+       /  \
+      / E2E \     <- 소수의 핵심 플로우
+     /______\
+    /        \
+   / 통합 테스트 \   <- 주요 모듈 연동
+  /____________\
+ /              \
+/   단위 테스트    \  <- 대부분의 테스트
+/__________________\
+```
 
-#### 백엔드 테스트
+**1. 단위 테스트 (Unit Tests)**
+- **목적**: 개별 함수, 메소드, 컴포넌트의 정확성 검증
+- **비율**: 전체 테스트의 70%
+- **특징**: 빠르고, 독립적이며, 단순함
+
+**2. 통합 테스트 (Integration Tests)**
+- **목적**: 여러 모듈/컴포넌트 간의 상호작용 검증
+- **비율**: 전체 테스트의 20%
+- **특징**: 실제 데이터베이스나 API와의 연동 테스트
+
+**3. E2E 테스트 (End-to-End Tests)**
+- **목적**: 사용자 관점에서 전체 애플리케이션 플로우 검증
+- **비율**: 전체 테스트의 10%
+- **특징**: 실제 브라우저 환경에서 테스트
+
+### 백엔드 테스트 상세 가이드
+
+#### 1. 테스트 환경 설정
+
+**build.gradle.kts 설정**
+```kotlin
+dependencies {
+    testImplementation("org.springframework.boot:spring-boot-starter-test")
+    testImplementation("org.springframework.boot:spring-boot-testcontainers")
+    testImplementation("org.testcontainers:junit-jupiter")
+    testImplementation("org.testcontainers:postgresql")
+    testImplementation("io.mockk:mockk:1.13.8")
+    testImplementation("com.ninja-squad:springmockk:4.0.2")
+}
+```
+
+**application-test.yml**
+```yaml
+spring:
+  datasource:
+    url: jdbc:h2:mem:testdb
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    show-sql: true
+  profiles:
+    active: test
+
+logging:
+  level:
+    com.company: DEBUG
+    org.springframework.web: DEBUG
+```
+
+#### 2. 단위 테스트 작성
+
+**도메인 엔티티 테스트**
+```kotlin
+// UserTest.kt
+@DisplayName("User 엔티티 테스트")
+class UserTest {
+    
+    @Test
+    @DisplayName("사용자 생성 - 성공")
+    fun `should create user with valid data`() {
+        // Given
+        val email = Email("test@example.com")
+        val name = "홍길동"
+        
+        // When
+        val user = User.create(name, email)
+        
+        // Then
+        assertThat(user.name).isEqualTo(name)
+        assertThat(user.email).isEqualTo(email)
+        assertThat(user.status).isEqualTo(UserStatus.ACTIVE)
+        assertThat(user.flagActive()).isTrue()
+    }
+    
+    @Test
+    @DisplayName("사용자 생성 - 빈 이름으로 실패")
+    fun `should fail to create user with empty name`() {
+        // Given
+        val email = Email("test@example.com")
+        val emptyName = ""
+        
+        // When & Then
+        assertThatThrownBy {
+            User.create(emptyName, email)
+        }.isInstanceOf(IllegalArgumentException::class.java)
+         .hasMessage("Name cannot be blank")
+    }
+    
+    @Test
+    @DisplayName("사용자 상태 변경")
+    fun `should change user status`() {
+        // Given
+        val user = User.create("홍길동", Email("test@example.com"))
+        
+        // When
+        user.deactivate()
+        
+        // Then
+        assertThat(user.status).isEqualTo(UserStatus.INACTIVE)
+        assertThat(user.flagActive()).isFalse()
+    }
+}
+```
+
+**도메인 서비스 테스트**
+```kotlin
+// UserDomainServiceTest.kt
+@ExtendWith(MockKExtension::class)
+@DisplayName("User 도메인 서비스 테스트")
+class UserDomainServiceTest {
+    
+    @MockK
+    private lateinit var userRepository: UserRepository
+    
+    private lateinit var userDomainService: UserDomainService
+    
+    @BeforeEach
+    fun setUp() {
+        userDomainService = UserDomainService(userRepository)
+    }
+    
+    @Test
+    @DisplayName("이메일 중복 검증 - 중복 없음")
+    fun `should validate email is not duplicated`() {
+        // Given
+        val email = Email("new@example.com")
+        every { userRepository.existsByEmail(email) } returns false
+        
+        // When
+        val result = userDomainService.validateEmailUniqueness(email)
+        
+        // Then
+        assertThat(result).isTrue()
+        verify { userRepository.existsByEmail(email) }
+    }
+    
+    @Test
+    @DisplayName("이메일 중복 검증 - 중복 존재")
+    fun `should throw exception when email is duplicated`() {
+        // Given
+        val email = Email("existing@example.com")
+        every { userRepository.existsByEmail(email) } returns true
+        
+        // When & Then
+        assertThatThrownBy {
+            userDomainService.validateEmailUniqueness(email)
+        }.isInstanceOf(DuplicateEmailException::class.java)
+         .hasMessage("Email already exists: ${email.value}")
+    }
+}
+```
+
+**애플리케이션 서비스 테스트**
+```kotlin
+// UserApplicationServiceTest.kt
+@ExtendWith(MockKExtension::class)
+@DisplayName("User 애플리케이션 서비스 테스트")
+class UserApplicationServiceTest {
+    
+    @MockK
+    private lateinit var userRepository: UserRepository
+    
+    @MockK
+    private lateinit var userDomainService: UserDomainService
+    
+    private lateinit var userApplicationService: UserApplicationService
+    
+    @BeforeEach
+    fun setUp() {
+        userApplicationService = UserApplicationService(
+            userRepository, 
+            userDomainService
+        )
+    }
+    
+    @Test
+    @DisplayName("사용자 생성 - 성공")
+    fun `should create user successfully`() {
+        // Given
+        val request = CreateUserRequest("홍길동", "test@example.com")
+        val user = User.create(request.name, Email(request.email))
+        
+        every { userDomainService.validateEmailUniqueness(any()) } returns true
+        every { userRepository.save(any()) } returns user.copy(id = 1L)
+        
+        // When
+        val response = userApplicationService.createUser(request)
+        
+        // Then
+        assertThat(response.id).isEqualTo(1L)
+        assertThat(response.name).isEqualTo(request.name)
+        assertThat(response.email).isEqualTo(request.email)
+        
+        verify { userDomainService.validateEmailUniqueness(Email(request.email)) }
+        verify { userRepository.save(any()) }
+    }
+    
+    @Test
+    @DisplayName("사용자 조회 - 존재하지 않는 사용자")
+    fun `should throw exception when user not found`() {
+        // Given
+        val userId = 999L
+        every { userRepository.findById(userId) } returns null
+        
+        // When & Then
+        assertThatThrownBy {
+            userApplicationService.getUser(userId)
+        }.isInstanceOf(UserNotFoundException::class.java)
+         .hasMessage("User not found with id: $userId")
+    }
+}
+```
+
+#### 3. 통합 테스트 작성
+
+**Repository 통합 테스트**
+```kotlin
+// UserRepositoryIntegrationTest.kt
+@DataJpaTest
+@TestPropertySource(properties = ["spring.jpa.hibernate.ddl-auto=create-drop"])
+@DisplayName("User Repository 통합 테스트")
+class UserRepositoryIntegrationTest @Autowired constructor(
+    private val userRepository: UserRepository,
+    private val testEntityManager: TestEntityManager
+) {
+    
+    @Test
+    @DisplayName("이메일로 사용자 조회")
+    fun `should find user by email`() {
+        // Given
+        val user = User.create("홍길동", Email("test@example.com"))
+        testEntityManager.persistAndFlush(user)
+        
+        // When
+        val foundUser = userRepository.findByEmail(Email("test@example.com"))
+        
+        // Then
+        assertThat(foundUser).isNotNull
+        assertThat(foundUser?.name).isEqualTo("홍길동")
+        assertThat(foundUser?.email?.value).isEqualTo("test@example.com")
+    }
+    
+    @Test
+    @DisplayName("활성 사용자 목록 조회")
+    fun `should find only active users`() {
+        // Given
+        val activeUser1 = User.create("홍길동", Email("active1@example.com"))
+        val activeUser2 = User.create("김철수", Email("active2@example.com"))
+        val inactiveUser = User.create("이영희", Email("inactive@example.com"))
+        inactiveUser.deactivate()
+        
+        testEntityManager.persistAndFlush(activeUser1)
+        testEntityManager.persistAndFlush(activeUser2)
+        testEntityManager.persistAndFlush(inactiveUser)
+        
+        // When
+        val activeUsers = userRepository.findByStatus(UserStatus.ACTIVE)
+        
+        // Then
+        assertThat(activeUsers).hasSize(2)
+        assertThat(activeUsers.map { it.name }).containsExactlyInAnyOrder("홍길동", "김철수")
+    }
+}
+```
+
+**Controller 통합 테스트**
+```kotlin
+// UserControllerIntegrationTest.kt
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@TestPropertySource(properties = ["spring.profiles.active=test"])
+@Transactional
+@DisplayName("User Controller 통합 테스트")
+class UserControllerIntegrationTest @Autowired constructor(
+    private val restTemplate: TestRestTemplate,
+    private val userRepository: UserRepository
+) {
+    
+    @Test
+    @DisplayName("사용자 생성 API - 성공")
+    fun `should create user via API`() {
+        // Given
+        val request = CreateUserRequest("홍길동", "test@example.com")
+        val entity = HttpEntity(request)
+        
+        // When
+        val response = restTemplate.postForEntity(
+            "/api/v1/users", 
+            entity, 
+            ApiResponse::class.java
+        )
+        
+        // Then
+        assertThat(response.statusCode).isEqualTo(HttpStatus.CREATED)
+        
+        val savedUser = userRepository.findByEmail(Email("test@example.com"))
+        assertThat(savedUser).isNotNull
+        assertThat(savedUser?.name).isEqualTo("홍길동")
+    }
+    
+    @Test
+    @DisplayName("사용자 목록 조회 API - 페이징")
+    fun `should get users with pagination`() {
+        // Given
+        repeat(25) { i ->
+            val user = User.create("사용자$i", Email("user$i@example.com"))
+            userRepository.save(user)
+        }
+        
+        // When
+        val response = restTemplate.getForEntity(
+            "/api/v1/users?page=0&size=10", 
+            String::class.java
+        )
+        
+        // Then
+        assertThat(response.statusCode).isEqualTo(HttpStatus.OK)
+        // JSON 응답 검증 로직 추가
+    }
+}
+```
+
+#### 4. 테스트 실행 및 커버리지
+
+**테스트 실행 명령어**
 ```bash
 # 모든 테스트 실행
 ./gradlew test
@@ -2142,26 +2475,637 @@ const UserCard: React.FC<UserCardProps> = ({ user, onEdit, onDelete }) => {
 # 특정 테스트 클래스 실행
 ./gradlew test --tests "*UserServiceTest"
 
-# 테스트 커버리지 확인
-./gradlew jacocoTestReport
+# 특정 패키지의 테스트 실행
+./gradlew test --tests "com.company.user.*"
+
+# 테스트 결과를 상세히 보기
+./gradlew test --info
+
+# 병렬 테스트 실행 (성능 향상)
+./gradlew test --parallel
+
+# 특정 테스트 메소드만 실행
+./gradlew test --tests "*UserServiceTest.should create user successfully"
 ```
 
-#### 프론트엔드 테스트
+**커버리지 확인**
+```bash
+# JaCoCo 커버리지 리포트 생성
+./gradlew jacocoTestReport
+
+# 커버리지 검증 (최소 80% 요구)
+./gradlew jacocoTestCoverageVerification
+
+# 리포트 확인 위치
+# build/reports/jacoco/test/html/index.html
+```
+
+**build.gradle.kts JaCoCo 설정**
+```kotlin
+jacoco {
+    toolVersion = "0.8.8"
+}
+
+tasks.jacocoTestReport {
+    reports {
+        xml.required.set(true)
+        html.required.set(true)
+        csv.required.set(false)
+    }
+    finalizedBy(tasks.jacocoTestCoverageVerification)
+}
+
+tasks.jacocoTestCoverageVerification {
+    violationRules {
+        rule {
+            limit {
+                minimum = "0.80".toBigDecimal() // 80% 커버리지 요구
+            }
+        }
+        rule {
+            element = "CLASS"
+            excludes = listOf("*.config.*", "*.dto.*")
+            limit {
+                counter = "LINE"
+                value = "COVEREDRATIO"
+                minimum = "0.80".toBigDecimal()
+            }
+        }
+    }
+}
+```
+
+### 프론트엔드 테스트 상세 가이드
+
+#### 1. 테스트 환경 설정
+
+**package.json 설정**
+```json
+{
+  "devDependencies": {
+    "@testing-library/react": "^13.4.0",
+    "@testing-library/jest-dom": "^5.16.5",
+    "@testing-library/user-event": "^14.4.3",
+    "jest": "^27.5.1",
+    "jest-environment-jsdom": "^27.5.1",
+    "msw": "^0.49.3"
+  },
+  "scripts": {
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
+    "test:ci": "jest --coverage --watchAll=false"
+  }
+}
+```
+
+**jest.config.js**
+```javascript
+module.exports = {
+  testEnvironment: 'jsdom',
+  setupFilesAfterEnv: ['<rootDir>/src/setupTests.js'],
+  moduleNameMapping: {
+    '\\.(css|less|scss|sass)$': 'identity-obj-proxy',
+    '^@/(.*)$': '<rootDir>/src/$1'
+  },
+  collectCoverageFrom: [
+    'src/**/*.{js,jsx}',
+    '!src/index.js',
+    '!src/reportWebVitals.js',
+    '!src/**/*.stories.js'
+  ],
+  coverageThreshold: {
+    global: {
+      branches: 80,
+      functions: 80,
+      lines: 80,
+      statements: 80
+    }
+  }
+};
+```
+
+**src/setupTests.js**
+```javascript
+import '@testing-library/jest-dom';
+import { server } from './mocks/server';
+
+// MSW 서버 설정
+beforeAll(() => server.listen());
+afterEach(() => server.resetHandlers());
+afterAll(() => server.close());
+```
+
+#### 2. 컴포넌트 단위 테스트
+
+**기본 컴포넌트 테스트**
+```javascript
+// UserCard.test.jsx
+import { render, screen, fireEvent } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { UserCard } from './UserCard';
+
+const mockUser = {
+  id: 1,
+  name: 'John Doe',
+  email: 'john@example.com',
+  status: 'ACTIVE'
+};
+
+describe('UserCard', () => {
+  test('사용자 정보를 올바르게 렌더링한다', () => {
+    // Given
+    const onEdit = jest.fn();
+    const onDelete = jest.fn();
+    
+    // When
+    render(
+      <UserCard 
+        user={mockUser} 
+        onEdit={onEdit} 
+        onDelete={onDelete} 
+      />
+    );
+    
+    // Then
+    expect(screen.getByText('John Doe')).toBeInTheDocument();
+    expect(screen.getByText('john@example.com')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /edit/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /delete/i })).toBeInTheDocument();
+  });
+  
+  test('편집 버튼 클릭 시 onEdit 콜백이 호출된다', async () => {
+    // Given
+    const user = userEvent.setup();
+    const onEdit = jest.fn();
+    const onDelete = jest.fn();
+    
+    render(
+      <UserCard 
+        user={mockUser} 
+        onEdit={onEdit} 
+        onDelete={onDelete} 
+      />
+    );
+    
+    // When
+    await user.click(screen.getByRole('button', { name: /edit/i }));
+    
+    // Then
+    expect(onEdit).toHaveBeenCalledTimes(1);
+    expect(onEdit).toHaveBeenCalledWith(1);
+  });
+  
+  test('삭제 버튼 클릭 시 onDelete 콜백이 호출된다', async () => {
+    // Given
+    const user = userEvent.setup();
+    const onEdit = jest.fn();
+    const onDelete = jest.fn();
+    
+    render(
+      <UserCard 
+        user={mockUser} 
+        onEdit={onEdit} 
+        onDelete={onDelete} 
+      />
+    );
+    
+    // When
+    await user.click(screen.getByRole('button', { name: /delete/i }));
+    
+    // Then
+    expect(onDelete).toHaveBeenCalledTimes(1);
+    expect(onDelete).toHaveBeenCalledWith(1);
+  });
+  
+  test('비활성 사용자의 경우 상태가 표시된다', () => {
+    // Given
+    const inactiveUser = { ...mockUser, status: 'INACTIVE' };
+    
+    // When
+    render(
+      <UserCard 
+        user={inactiveUser} 
+        onEdit={() => {}} 
+        onDelete={() => {}} 
+      />
+    );
+    
+    // Then
+    expect(screen.getByText(/inactive/i)).toBeInTheDocument();
+  });
+});
+```
+
+**폼 컴포넌트 테스트**
+```javascript
+// UserForm.test.jsx
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { UserForm } from './UserForm';
+
+describe('UserForm', () => {
+  test('폼 제출 시 올바른 데이터가 전달된다', async () => {
+    // Given
+    const user = userEvent.setup();
+    const onSubmit = jest.fn();
+    
+    render(<UserForm onSubmit={onSubmit} />);
+    
+    // When
+    await user.type(screen.getByLabelText(/name/i), 'John Doe');
+    await user.type(screen.getByLabelText(/email/i), 'john@example.com');
+    await user.click(screen.getByRole('button', { name: /submit/i }));
+    
+    // Then
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledWith({
+        name: 'John Doe',
+        email: 'john@example.com'
+      });
+    });
+  });
+  
+  test('필수 필드 누락 시 에러 메시지가 표시된다', async () => {
+    // Given
+    const user = userEvent.setup();
+    const onSubmit = jest.fn();
+    
+    render(<UserForm onSubmit={onSubmit} />);
+    
+    // When
+    await user.click(screen.getByRole('button', { name: /submit/i }));
+    
+    // Then
+    expect(screen.getByText(/name is required/i)).toBeInTheDocument();
+    expect(screen.getByText(/email is required/i)).toBeInTheDocument();
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+  
+  test('잘못된 이메일 형식 시 에러 메시지가 표시된다', async () => {
+    // Given
+    const user = userEvent.setup();
+    const onSubmit = jest.fn();
+    
+    render(<UserForm onSubmit={onSubmit} />);
+    
+    // When
+    await user.type(screen.getByLabelText(/name/i), 'John Doe');
+    await user.type(screen.getByLabelText(/email/i), 'invalid-email');
+    await user.click(screen.getByRole('button', { name: /submit/i }));
+    
+    // Then
+    expect(screen.getByText(/invalid email format/i)).toBeInTheDocument();
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+});
+```
+
+#### 3. 커스텀 Hook 테스트
+
+```javascript
+// useUsers.test.js
+import { renderHook, waitFor } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { rest } from 'msw';
+import { server } from '../mocks/server';
+import { useUsers, useCreateUser } from './useUsers';
+
+const createWrapper = () => {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false },
+      mutations: { retry: false },
+    },
+  });
+
+  return ({ children }) => (
+    <QueryClientProvider client={queryClient}>
+      {children}
+    </QueryClientProvider>
+  );
+};
+
+describe('useUsers', () => {
+  test('사용자 목록을 성공적으로 가져온다', async () => {
+    // Given
+    const mockUsers = [
+      { id: 1, name: 'John Doe', email: 'john@example.com' },
+      { id: 2, name: 'Jane Smith', email: 'jane@example.com' }
+    ];
+    
+    server.use(
+      rest.get('/api/v1/users', (req, res, ctx) => {
+        return res(ctx.json({ data: mockUsers }));
+      })
+    );
+
+    // When
+    const { result } = renderHook(() => useUsers(), {
+      wrapper: createWrapper(),
+    });
+
+    // Then
+    await waitFor(() => {
+      expect(result.current.isSuccess).toBe(true);
+    });
+
+    expect(result.current.data).toEqual(mockUsers);
+  });
+
+  test('API 에러 시 에러 상태를 반환한다', async () => {
+    // Given
+    server.use(
+      rest.get('/api/v1/users', (req, res, ctx) => {
+        return res(ctx.status(500), ctx.json({ message: 'Server Error' }));
+      })
+    );
+
+    // When
+    const { result } = renderHook(() => useUsers(), {
+      wrapper: createWrapper(),
+    });
+
+    // Then
+    await waitFor(() => {
+      expect(result.current.isError).toBe(true);
+    });
+
+    expect(result.current.error).toBeDefined();
+  });
+});
+
+describe('useCreateUser', () => {
+  test('사용자를 성공적으로 생성한다', async () => {
+    // Given
+    const newUser = { name: 'New User', email: 'new@example.com' };
+    const createdUser = { id: 3, ...newUser };
+    
+    server.use(
+      rest.post('/api/v1/users', (req, res, ctx) => {
+        return res(ctx.status(201), ctx.json(createdUser));
+      })
+    );
+
+    // When
+    const { result } = renderHook(() => useCreateUser(), {
+      wrapper: createWrapper(),
+    });
+
+    // Then
+    await waitFor(() => {
+      result.current.mutate(newUser);
+    });
+
+    await waitFor(() => {
+      expect(result.current.isSuccess).toBe(true);
+    });
+
+    expect(result.current.data).toEqual(createdUser);
+  });
+});
+```
+
+#### 4. 통합 테스트 (페이지 단위)
+
+```javascript
+// UserListPage.test.jsx
+import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { rest } from 'msw';
+import { server } from '../mocks/server';
+import { UserListPage } from './UserListPage';
+
+const renderWithProviders = (component) => {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false },
+      mutations: { retry: false },
+    },
+  });
+
+  return render(
+    <QueryClientProvider client={queryClient}>
+      {component}
+    </QueryClientProvider>
+  );
+};
+
+describe('UserListPage', () => {
+  test('사용자 목록 페이지가 정상적으로 렌더링된다', async () => {
+    // Given
+    const mockUsers = [
+      { id: 1, name: 'John Doe', email: 'john@example.com' },
+      { id: 2, name: 'Jane Smith', email: 'jane@example.com' }
+    ];
+    
+    server.use(
+      rest.get('/api/v1/users', (req, res, ctx) => {
+        return res(ctx.json({ data: mockUsers }));
+      })
+    );
+
+    // When
+    renderWithProviders(<UserListPage />);
+
+    // Then
+    expect(screen.getByText(/loading/i)).toBeInTheDocument();
+    
+    await waitFor(() => {
+      expect(screen.getByText('John Doe')).toBeInTheDocument();
+      expect(screen.getByText('Jane Smith')).toBeInTheDocument();
+    });
+    
+    expect(screen.getByText(/user list/i)).toBeInTheDocument();
+  });
+  
+  test('새 사용자 추가 플로우가 정상 동작한다', async () => {
+    // Given
+    const user = userEvent.setup();
+    const mockUsers = [];
+    const newUser = { id: 1, name: 'New User', email: 'new@example.com' };
+    
+    server.use(
+      rest.get('/api/v1/users', (req, res, ctx) => {
+        return res(ctx.json({ data: mockUsers }));
+      }),
+      rest.post('/api/v1/users', (req, res, ctx) => {
+        return res(ctx.status(201), ctx.json(newUser));
+      })
+    );
+
+    renderWithProviders(<UserListPage />);
+    
+    await waitFor(() => {
+      expect(screen.getByText(/no users found/i)).toBeInTheDocument();
+    });
+
+    // When
+    await user.click(screen.getByRole('button', { name: /add user/i }));
+    await user.type(screen.getByLabelText(/name/i), 'New User');
+    await user.type(screen.getByLabelText(/email/i), 'new@example.com');
+    await user.click(screen.getByRole('button', { name: /save/i }));
+
+    // Then
+    await waitFor(() => {
+      expect(screen.getByText('New User')).toBeInTheDocument();
+    });
+  });
+});
+```
+
+#### 5. 테스트 실행 및 결과 확인
+
+**테스트 실행 명령어**
 ```bash
 # 모든 테스트 실행
 npm test
 
-# 특정 테스트 파일 실행
-npm test -- --testNamePattern="UserProfile"
+# Watch 모드로 테스트 실행 (개발 중)
+npm run test:watch
 
-# 테스트 커버리지 확인
+# 특정 파일만 테스트
+npm test UserCard.test.jsx
+
+# 특정 테스트 패턴으로 실행
+npm test -- --testNamePattern="사용자 정보"
+
+# 커버리지와 함께 테스트 실행
 npm run test:coverage
+
+# CI 환경에서 테스트 실행
+npm run test:ci
 ```
 
-### 테스트 작성 규칙
-- 테스트 파일은 `[파일명].test.js` 형식으로 명명
-- 각 기능에 대해 최소 80% 이상의 코드 커버리지 유지
-- 테스트는 독립적이고 반복 가능해야 함
+**테스트 결과 해석**
+```bash
+# 성공 예시
+ PASS  src/components/UserCard.test.jsx
+  UserCard
+    ✓ 사용자 정보를 올바르게 렌더링한다 (25ms)
+    ✓ 편집 버튼 클릭 시 onEdit 콜백이 호출된다 (15ms)
+    ✓ 삭제 버튼 클릭 시 onDelete 콜백이 호출된다 (12ms)
+
+Test Suites: 1 passed, 1 total
+Tests:       3 passed, 3 total
+Snapshots:   0 total
+Time:        2.456s
+```
+
+**커버리지 리포트 확인**
+```bash
+# 커버리지 리포트 위치
+coverage/lcov-report/index.html
+
+# 터미널에서 커버리지 요약 확인
+npm run test:coverage
+
+# 결과 예시
+----------------------|---------|----------|---------|---------|
+File                  | % Stmts | % Branch | % Funcs | % Lines |
+----------------------|---------|----------|---------|---------|
+All files            |   88.89 |     87.5 |     100 |   88.24 |
+ src/components       |   91.67 |     87.5 |     100 |   90.91 |
+  UserCard.jsx        |   91.67 |     87.5 |     100 |   90.91 |
+ src/hooks            |   85.71 |       75 |     100 |   85.71 |
+  useUsers.js         |   85.71 |       75 |     100 |   85.71 |
+----------------------|---------|----------|---------|---------|
+```
+
+### 테스트 작성 규칙 및 베스트 프랙티스
+
+#### 1. 명명 규칙
+```javascript
+// ✅ 좋은 예: 한국어로 명확한 의도 표현
+describe('UserCard', () => {
+  test('사용자 정보를 올바르게 렌더링한다', () => {});
+  test('편집 버튼 클릭 시 onEdit 콜백이 호출된다', () => {});
+  test('비활성 사용자의 경우 비활성 상태가 표시된다', () => {});
+});
+
+// ❌ 나쁜 예: 모호한 테스트 이름
+describe('UserCard', () => {
+  test('test1', () => {});
+  test('should work', () => {});
+  test('button click', () => {});
+});
+```
+
+#### 2. AAA 패턴 (Arrange, Act, Assert)
+```javascript
+test('사용자 생성 시 올바른 데이터가 저장된다', async () => {
+  // Arrange (준비)
+  const userData = { name: 'John', email: 'john@example.com' };
+  const mockSave = jest.fn().mockResolvedValue({ id: 1, ...userData });
+  
+  // Act (실행)
+  const result = await userService.createUser(userData);
+  
+  // Assert (검증)
+  expect(result.id).toBe(1);
+  expect(result.name).toBe('John');
+  expect(mockSave).toHaveBeenCalledWith(userData);
+});
+```
+
+#### 3. 테스트 독립성 보장
+```javascript
+describe('UserService', () => {
+  beforeEach(() => {
+    // 각 테스트 전에 상태 초기화
+    jest.clearAllMocks();
+    localStorage.clear();
+  });
+  
+  afterEach(() => {
+    // 각 테스트 후 정리
+    cleanup();
+  });
+});
+```
+
+#### 4. 커버리지 목표
+- **최소 커버리지**: 80%
+- **중요 비즈니스 로직**: 95% 이상
+- **유틸리티 함수**: 100%
+
+#### 5. CI/CD 통합
+**.github/workflows/test.yml**
+```yaml
+name: Tests
+on: [push, pull_request]
+
+jobs:
+  backend-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-java@v3
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+      - name: Run Backend Tests
+        run: ./gradlew test jacocoTestReport
+      - name: Upload Coverage
+        uses: codecov/codecov-action@v3
+
+  frontend-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+      - name: Install Dependencies
+        run: npm ci
+      - name: Run Frontend Tests
+        run: npm run test:ci
+      - name: Upload Coverage
+        uses: codecov/codecov-action@v3
+```
+
+이제 **완전한 테스트 가이드라인**이 완성되었습니다! 🧪✨
 
 ## 배포 프로세스
 
