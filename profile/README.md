@@ -178,6 +178,679 @@ Fixes #이슈번호
 - 코드 포맷팅: `npm run format`
 - 린트 체크: `npm run lint`
 
+## 백엔드 상세 코딩 가이드
+
+### Kotlin 코딩 스타일
+
+#### 명명 규칙
+```kotlin
+// 클래스: PascalCase
+class UserService
+class OrderRepository
+
+// 함수/변수: camelCase
+fun getUserById(id: Long): User?
+val userName = "john_doe"
+
+// 상수: UPPER_SNAKE_CASE
+const val MAX_RETRY_COUNT = 3
+const val DEFAULT_PAGE_SIZE = 20
+
+// 패키지: 소문자, 점으로 구분
+package com.company.user.domain.model
+```
+
+#### 함수 작성 가이드
+```kotlin
+// ✅ 좋은 예: 명확한 함수명과 타입 지정
+fun findUserByEmail(email: String): User? {
+    return userRepository.findByEmail(email)
+}
+
+// ✅ 함수 인자가 많을 때는 여러 줄로
+fun createUser(
+    name: String,
+    email: String,
+    phoneNumber: String,
+    address: String
+): User {
+    // 구현
+}
+
+// ✅ 확장 함수 활용
+fun String.validEmailFlag(): Boolean {
+    return this.contains("@") && this.contains(".")
+}
+```
+
+#### Null Safety 활용
+```kotlin
+// ✅ Safe Call 연산자 사용
+val userName = user?.name ?: "Unknown"
+
+// ✅ let 함수 활용
+user?.let { 
+    sendNotification(it.email)
+    logUserActivity(it.id)
+}
+
+// ✅ 조건부 실행
+if (user != null) {
+    processUser(user)
+}
+```
+
+### DDD 구현 가이드
+
+#### 1. Domain Model (엔티티/값 객체)
+```kotlin
+// Entity 예제
+@Entity
+@Table(name = "users")
+data class User(
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    val id: Long = 0,
+    
+    @Column(nullable = false)
+    val name: String,
+    
+    @Column(nullable = false, unique = true)
+    val email: Email,
+    
+    @Enumerated(EnumType.STRING)
+    val status: UserStatus = UserStatus.ACTIVE,
+    
+    @CreationTimestamp
+    val createdAt: LocalDateTime = LocalDateTime.now()
+) {
+    fun activate() {
+        // 도메인 로직
+    }
+    
+    fun deactivate() {
+        // 도메인 로직
+    }
+    
+    fun flagActive(): Boolean = status == UserStatus.ACTIVE
+}
+
+// Value Object 예제
+@Embeddable
+data class Email(
+    @Column(name = "email")
+    private val value: String
+) {
+    init {
+        require(validFlag(value)) { "Invalid email format: $value" }
+    }
+    
+    private fun validFlag(email: String): Boolean {
+        return email.matches(Regex("^[A-Za-z0-9+_.-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$"))
+    }
+    
+    override fun toString(): String = value
+}
+
+enum class UserStatus {
+    ACTIVE, INACTIVE, SUSPENDED
+}
+```
+
+#### 2. Domain Service
+```kotlin
+@Component
+class UserDomainService(
+    private val userRepository: UserRepository,
+    private val emailValidator: EmailValidator
+) {
+    
+    fun validateUserRegistration(user: User): ValidationResult {
+        val errors = mutableListOf<String>()
+        
+        // 이메일 중복 체크
+        if (userRepository.existsByEmail(user.email)) {
+            errors.add("Email already exists")
+        }
+        
+        // 도메인 규칙 검증
+        if (!emailValidator.validFlag(user.email.toString())) {
+            errors.add("Invalid email format")
+        }
+        
+        return if (errors.isEmpty()) {
+            ValidationResult.success()
+        } else {
+            ValidationResult.failure(errors)
+        }
+    }
+}
+```
+
+#### 3. Repository Interface (Domain)
+```kotlin
+interface UserRepository {
+    fun save(user: User): User
+    fun findById(id: Long): User?
+    fun findByEmail(email: Email): User?
+    fun existsByEmail(email: Email): Boolean
+    fun findAll(pageable: Pageable): Page<User>
+    fun delete(user: User)
+}
+```
+
+#### 4. Repository Implementation (Infrastructure)
+```kotlin
+@Repository
+class JpaUserRepository(
+    private val jpaRepository: UserJpaRepository
+) : UserRepository {
+    
+    override fun save(user: User): User {
+        return jpaRepository.save(user)
+    }
+    
+    override fun findById(id: Long): User? {
+        return jpaRepository.findById(id).orElse(null)
+    }
+    
+    override fun findByEmail(email: Email): User? {
+        return jpaRepository.findByEmail(email.toString())
+    }
+    
+    override fun existsByEmail(email: Email): Boolean {
+        return jpaRepository.existsByEmail(email.toString())
+    }
+    
+    override fun findAll(pageable: Pageable): Page<User> {
+        return jpaRepository.findAll(pageable)
+    }
+    
+    override fun delete(user: User) {
+        jpaRepository.delete(user)
+    }
+}
+
+@Repository
+interface UserJpaRepository : JpaRepository<User, Long> {
+    fun findByEmail(email: String): User?
+    fun existsByEmail(email: String): Boolean
+}
+```
+
+#### 5. Application Service
+```kotlin
+@Service
+@Transactional(readOnly = true)
+class UserApplicationService(
+    private val userRepository: UserRepository,
+    private val userDomainService: UserDomainService,
+    private val eventPublisher: ApplicationEventPublisher
+) {
+    
+    @Transactional
+    fun createUser(command: CreateUserCommand): UserResponse {
+        val user = User(
+            name = command.name,
+            email = Email(command.email)
+        )
+        
+        // 도메인 검증
+        val validationResult = userDomainService.validateUserRegistration(user)
+        if (!validationResult.successFlag) {
+            throw ValidationException(validationResult.errors)
+        }
+        
+        // 저장
+        val savedUser = userRepository.save(user)
+        
+        // 이벤트 발행
+        eventPublisher.publishEvent(UserCreatedEvent(savedUser.id, savedUser.email))
+        
+        return UserResponse.from(savedUser)
+    }
+    
+    fun getUserById(id: Long): UserResponse {
+        val user = userRepository.findById(id)
+            ?: throw EntityNotFoundException("User not found with id: $id")
+        
+        return UserResponse.from(user)
+    }
+    
+    fun getUsersByPage(page: Int, size: Int): Page<UserResponse> {
+        val pageable = PageRequest.of(page, size, Sort.by("createdAt").descending())
+        return userRepository.findAll(pageable).map { UserResponse.from(it) }
+    }
+}
+```
+
+#### 6. DTO 및 Command/Query 객체
+```kotlin
+// Command 객체
+data class CreateUserCommand(
+    val name: String,
+    val email: String
+) {
+    init {
+        require(name.isNotBlank()) { "Name cannot be blank" }
+        require(email.isNotBlank()) { "Email cannot be blank" }
+    }
+}
+
+// Response DTO
+data class UserResponse(
+    val id: Long,
+    val name: String,
+    val email: String,
+    val status: String,
+    val createdAt: LocalDateTime
+) {
+    companion object {
+        fun from(user: User): UserResponse {
+            return UserResponse(
+                id = user.id,
+                name = user.name,
+                email = user.email.toString(),
+                status = user.status.name,
+                createdAt = user.createdAt
+            )
+        }
+    }
+}
+```
+
+### REST API 설계 가이드
+
+#### Controller 구현
+```kotlin
+@RestController
+@RequestMapping("/api/v1/users")
+@Validated
+class UserController(
+    private val userApplicationService: UserApplicationService
+) {
+    
+    @PostMapping
+    @ResponseStatus(HttpStatus.CREATED)
+    fun createUser(
+        @Valid @RequestBody request: CreateUserRequest
+    ): ResponseEntity<ApiResponse<UserResponse>> {
+        val command = CreateUserCommand(
+            name = request.name,
+            email = request.email
+        )
+        
+        val user = userApplicationService.createUser(command)
+        
+        return ResponseEntity.ok(
+            ApiResponse.success(
+                data = user,
+                message = "User created successfully"
+            )
+        )
+    }
+    
+    @GetMapping("/{id}")
+    fun getUserById(
+        @PathVariable @Min(1) id: Long
+    ): ResponseEntity<ApiResponse<UserResponse>> {
+        val user = userApplicationService.getUserById(id)
+        
+        return ResponseEntity.ok(
+            ApiResponse.success(data = user)
+        )
+    }
+    
+    @GetMapping
+    fun getUsers(
+        @RequestParam(defaultValue = "0") @Min(0) page: Int,
+        @RequestParam(defaultValue = "20") @Min(1) @Max(100) size: Int
+    ): ResponseEntity<ApiResponse<Page<UserResponse>>> {
+        val users = userApplicationService.getUsersByPage(page, size)
+        
+        return ResponseEntity.ok(
+            ApiResponse.success(data = users)
+        )
+    }
+}
+
+// API 요청 DTO
+data class CreateUserRequest(
+    @field:NotBlank(message = "Name is required")
+    @field:Size(min = 2, max = 50, message = "Name must be between 2 and 50 characters")
+    val name: String,
+    
+    @field:NotBlank(message = "Email is required")
+    @field:Email(message = "Invalid email format")
+    val email: String
+)
+```
+
+#### 표준 API 응답 형식
+```kotlin
+data class ApiResponse<T>(
+    val success: Boolean,
+    val data: T?,
+    val message: String?,
+    val errors: List<String>?,
+    val timestamp: LocalDateTime = LocalDateTime.now()
+) {
+    companion object {
+        fun <T> success(data: T, message: String? = null): ApiResponse<T> {
+            return ApiResponse(
+                success = true,
+                data = data,
+                message = message,
+                errors = null
+            )
+        }
+        
+        fun <T> failure(message: String, errors: List<String>? = null): ApiResponse<T> {
+            return ApiResponse(
+                success = false,
+                data = null,
+                message = message,
+                errors = errors
+            )
+        }
+    }
+}
+```
+
+### 예외 처리 가이드
+
+#### 커스텀 예외 정의
+```kotlin
+// 기본 비즈니스 예외
+abstract class BusinessException(
+    message: String,
+    val errorCode: String,
+    cause: Throwable? = null
+) : RuntimeException(message, cause)
+
+// 구체적인 예외들
+class EntityNotFoundException(message: String) : 
+    BusinessException(message, "ENTITY_NOT_FOUND")
+
+class ValidationException(val errors: List<String>) : 
+    BusinessException("Validation failed", "VALIDATION_ERROR")
+
+class DuplicateEntityException(message: String) : 
+    BusinessException(message, "DUPLICATE_ENTITY")
+```
+
+#### 글로벌 예외 처리
+```kotlin
+@ControllerAdvice
+class GlobalExceptionHandler {
+    
+    private val logger = LoggerFactory.getLogger(GlobalExceptionHandler::class.java)
+    
+    @ExceptionHandler(EntityNotFoundException::class)
+    @ResponseStatus(HttpStatus.NOT_FOUND)
+    fun handleEntityNotFoundException(ex: EntityNotFoundException): ApiResponse<Nothing> {
+        logger.warn("Entity not found: ${ex.message}")
+        return ApiResponse.failure(ex.message ?: "Entity not found")
+    }
+    
+    @ExceptionHandler(ValidationException::class)
+    @ResponseStatus(HttpStatus.BAD_REQUEST)
+    fun handleValidationException(ex: ValidationException): ApiResponse<Nothing> {
+        logger.warn("Validation error: ${ex.errors}")
+        return ApiResponse.failure("Validation failed", ex.errors)
+    }
+    
+    @ExceptionHandler(MethodArgumentNotValidException::class)
+    @ResponseStatus(HttpStatus.BAD_REQUEST)
+    fun handleMethodArgumentNotValid(ex: MethodArgumentNotValidException): ApiResponse<Nothing> {
+        val errors = ex.bindingResult.fieldErrors.map { "${it.field}: ${it.defaultMessage}" }
+        logger.warn("Validation error: $errors")
+        return ApiResponse.failure("Validation failed", errors)
+    }
+    
+    @ExceptionHandler(Exception::class)
+    @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
+    fun handleGenericException(ex: Exception): ApiResponse<Nothing> {
+        logger.error("Unexpected error occurred", ex)
+        return ApiResponse.failure("An unexpected error occurred")
+    }
+}
+```
+
+### 데이터베이스 및 JPA 가이드
+
+#### Entity 매핑 베스트 프랙티스
+```kotlin
+@Entity
+@Table(
+    name = "orders",
+    indexes = [
+        Index(name = "idx_user_id", columnList = "user_id"),
+        Index(name = "idx_created_at", columnList = "created_at")
+    ]
+)
+class Order(
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    val id: Long = 0,
+    
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "user_id", nullable = false)
+    val user: User,
+    
+    @OneToMany(
+        mappedBy = "order", 
+        cascade = [CascadeType.ALL], 
+        orphanRemoval = true,
+        fetch = FetchType.LAZY
+    )
+    val orderItems: MutableList<OrderItem> = mutableListOf(),
+    
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    val status: OrderStatus = OrderStatus.PENDING,
+    
+    @Column(name = "total_amount", nullable = false, precision = 10, scale = 2)
+    val totalAmount: BigDecimal,
+    
+    @CreationTimestamp
+    @Column(name = "created_at", nullable = false, updatable = false)
+    val createdAt: LocalDateTime = LocalDateTime.now(),
+    
+    @UpdateTimestamp
+    @Column(name = "updated_at", nullable = false)
+    val updatedAt: LocalDateTime = LocalDateTime.now()
+) {
+    fun addOrderItem(orderItem: OrderItem) {
+        orderItems.add(orderItem)
+        orderItem.order = this
+    }
+    
+    fun removeOrderItem(orderItem: OrderItem) {
+        orderItems.remove(orderItem)
+        orderItem.order = null
+    }
+}
+```
+
+#### 복잡한 쿼리 처리
+```kotlin
+@Repository
+interface OrderRepository : JpaRepository<Order, Long> {
+    
+    @Query("""
+        SELECT o FROM Order o
+        JOIN FETCH o.user u
+        WHERE o.status = :status
+        AND o.createdAt BETWEEN :startDate AND :endDate
+        ORDER BY o.createdAt DESC
+    """)
+    fun findOrdersByStatusAndDateRange(
+        status: OrderStatus,
+        startDate: LocalDateTime,
+        endDate: LocalDateTime,
+        pageable: Pageable
+    ): Page<Order>
+    
+    @Query("""
+        SELECT new com.company.dto.OrderSummary(
+            o.id, 
+            u.name, 
+            o.totalAmount, 
+            o.status, 
+            o.createdAt
+        )
+        FROM Order o
+        JOIN o.user u
+        WHERE u.id = :userId
+        ORDER BY o.createdAt DESC
+    """)
+    fun findOrderSummariesByUserId(
+        userId: Long,
+        pageable: Pageable
+    ): Page<OrderSummary>
+}
+```
+
+### 테스트 작성 가이드
+
+#### 단위 테스트
+```kotlin
+@ExtendWith(MockitoExtension::class)
+class UserApplicationServiceTest {
+    
+    @Mock
+    private lateinit var userRepository: UserRepository
+    
+    @Mock
+    private lateinit var userDomainService: UserDomainService
+    
+    @Mock
+    private lateinit var eventPublisher: ApplicationEventPublisher
+    
+    @InjectMocks
+    private lateinit var userApplicationService: UserApplicationService
+    
+    @Test
+    fun `should create user successfully`() {
+        // Given
+        val command = CreateUserCommand("John Doe", "john@example.com")
+        val user = User(name = command.name, email = Email(command.email))
+        val savedUser = user.copy(id = 1L)
+        
+        whenever(userDomainService.validateUserRegistration(any()))
+            .thenReturn(ValidationResult.success())
+        whenever(userRepository.save(any<User>()))
+            .thenReturn(savedUser)
+        
+        // When
+        val result = userApplicationService.createUser(command)
+        
+        // Then
+        assertThat(result.id).isEqualTo(1L)
+        assertThat(result.name).isEqualTo("John Doe")
+        assertThat(result.email).isEqualTo("john@example.com")
+        
+        verify(userRepository).save(any<User>())
+        verify(eventPublisher).publishEvent(any<UserCreatedEvent>())
+    }
+    
+    @Test
+    fun `should throw exception when user not found`() {
+        // Given
+        val userId = 999L
+        whenever(userRepository.findById(userId)).thenReturn(null)
+        
+        // When & Then
+        assertThatThrownBy { 
+            userApplicationService.getUserById(userId) 
+        }
+        .isInstanceOf(EntityNotFoundException::class.java)
+        .hasMessage("User not found with id: $userId")
+    }
+}
+```
+
+#### 통합 테스트
+```kotlin
+@SpringBootTest
+@TestPropertySource(locations = ["classpath:application-test.properties"])
+@Transactional
+class UserIntegrationTest {
+    
+    @Autowired
+    private lateinit var userApplicationService: UserApplicationService
+    
+    @Autowired
+    private lateinit var userRepository: UserRepository
+    
+    @Test
+    fun `should create and retrieve user`() {
+        // Given
+        val command = CreateUserCommand("Integration Test", "integration@test.com")
+        
+        // When
+        val createdUser = userApplicationService.createUser(command)
+        val retrievedUser = userApplicationService.getUserById(createdUser.id)
+        
+        // Then
+        assertThat(retrievedUser.name).isEqualTo("Integration Test")
+        assertThat(retrievedUser.email).isEqualTo("integration@test.com")
+        assertThat(retrievedUser.status).isEqualTo("ACTIVE")
+    }
+}
+```
+
+### 성능 최적화 가이드
+
+#### N+1 문제 해결
+```kotlin
+// ❌ N+1 문제 발생
+fun getBadOrders(): List<OrderResponse> {
+    return orderRepository.findAll().map { order ->
+        OrderResponse(
+            id = order.id,
+            userName = order.user.name, // 지연 로딩으로 N+1 발생
+            itemCount = order.orderItems.size // 지연 로딩으로 N+1 발생
+        )
+    }
+}
+
+// ✅ Fetch Join으로 해결
+@Query("""
+    SELECT DISTINCT o FROM Order o
+    JOIN FETCH o.user
+    JOIN FETCH o.orderItems
+""")
+fun findAllWithUserAndItems(): List<Order>
+
+// ✅ EntityGraph 사용
+@EntityGraph(attributePaths = ["user", "orderItems"])
+fun findAllWithGraph(): List<Order>
+```
+
+#### 캐싱 활용
+```kotlin
+@Service
+class UserApplicationService {
+    
+    @Cacheable(value = ["users"], key = "#id")
+    fun getUserById(id: Long): UserResponse {
+        // 구현
+    }
+    
+    @CacheEvict(value = ["users"], key = "#result.id")
+    fun updateUser(command: UpdateUserCommand): UserResponse {
+        // 구현
+    }
+    
+    @CacheEvict(value = ["users"], allEntries = true)
+    fun clearUserCache() {
+        // 캐시 전체 삭제
+    }
+}
+```
+
 ## 테스트 가이드라인
 
 ### 테스트 종류
