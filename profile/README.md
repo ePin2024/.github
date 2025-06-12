@@ -20,7 +20,7 @@
 ### 주요 기술 스택
 - **언어**: Kotlin, JavaScript
 - **프레임워크**: Spring Boot, React.js
-- **데이터베이스**: PostgreSQL, MySQL
+- **데이터베이스**: PostgreSQL, MySQL, MongoDB, Redis
 - **도구**: IntelliJ IDEA, Cursor AI
 
 ## 개발 환경 설정
@@ -513,6 +513,1351 @@ data class UserResponse(
     }
 }
 ```
+
+### Redis 설정 및 사용 가이드
+
+#### 1. Redis 설정
+
+**application.yml 설정**
+```yaml
+spring:
+  redis:
+    host: ${REDIS_HOST:localhost}
+    port: ${REDIS_PORT:6379}
+    password: ${REDIS_PASSWORD:}
+    timeout: 2000ms
+    lettuce:
+      pool:
+        max-active: 8
+        max-idle: 8
+        min-idle: 0
+        max-wait: -1ms
+    database: 0  # 기본 데이터베이스 인덱스
+```
+
+**RedisConfig 설정 클래스**
+```kotlin
+@Configuration
+@EnableRedisRepositories
+class RedisConfig {
+    
+    @Value("\${spring.redis.host}")
+    private lateinit var host: String
+    
+    @Value("\${spring.redis.port}")
+    private var port: Int = 6379
+    
+    @Value("\${spring.redis.password}")
+    private lateinit var password: String
+    
+    @Bean
+    fun redisConnectionFactory(): LettuceConnectionFactory {
+        val configuration = RedisStandaloneConfiguration(host, port)
+        if (password.isNotBlank()) {
+            configuration.password = RedisPassword.of(password)
+        }
+        return LettuceConnectionFactory(configuration)
+    }
+    
+    @Bean
+    fun redisTemplate(): RedisTemplate<String, Any> {
+        val template = RedisTemplate<String, Any>()
+        template.connectionFactory = redisConnectionFactory()
+        
+        // JSON 직렬화 설정
+        val jackson2JsonRedisSerializer = Jackson2JsonRedisSerializer(Any::class.java)
+        val objectMapper = ObjectMapper()
+        objectMapper.setVisibility(PropertyAccessor.ALL, JsonAutoDetect.Visibility.ANY)
+        objectMapper.activateDefaultTyping(
+            LaissezFaireSubTypeValidator.instance,
+            ObjectMapper.DefaultTyping.NON_FINAL
+        )
+        jackson2JsonRedisSerializer.setObjectMapper(objectMapper)
+        
+        // Key-Value 직렬화 설정
+        template.keySerializer = StringRedisSerializer()
+        template.valueSerializer = jackson2JsonRedisSerializer
+        template.hashKeySerializer = StringRedisSerializer()
+        template.hashValueSerializer = jackson2JsonRedisSerializer
+        
+        template.afterPropertiesSet()
+        return template
+    }
+    
+    @Bean
+    fun stringRedisTemplate(): StringRedisTemplate {
+        return StringRedisTemplate(redisConnectionFactory())
+    }
+}
+```
+
+#### 2. Redis 사용 패턴
+
+**캐시 서비스 구현**
+```kotlin
+@Service
+class RedisCacheService(
+    private val redisTemplate: RedisTemplate<String, Any>,
+    private val stringRedisTemplate: StringRedisTemplate
+) {
+    
+    companion object {
+        private const val USER_CACHE_PREFIX = "user:"
+        private const val SESSION_PREFIX = "session:"
+        private const val CACHE_TTL = 3600L // 1시간
+    }
+    
+    // 객체 캐시 저장
+    fun cacheUser(userId: Long, user: User, ttlSeconds: Long = CACHE_TTL) {
+        val key = "$USER_CACHE_PREFIX$userId"
+        redisTemplate.opsForValue().set(key, user, Duration.ofSeconds(ttlSeconds))
+    }
+    
+    // 객체 캐시 조회
+    fun getCachedUser(userId: Long): User? {
+        val key = "$USER_CACHE_PREFIX$userId"
+        return redisTemplate.opsForValue().get(key) as? User
+    }
+    
+    // 캐시 삭제
+    fun evictUserCache(userId: Long) {
+        val key = "$USER_CACHE_PREFIX$userId"
+        redisTemplate.delete(key)
+    }
+    
+    // 패턴 기반 캐시 삭제
+    fun evictUserCacheByPattern(pattern: String = "$USER_CACHE_PREFIX*") {
+        val keys = redisTemplate.keys(pattern)
+        if (keys.isNotEmpty()) {
+            redisTemplate.delete(keys)
+        }
+    }
+    
+    // 세션 관리
+    fun createSession(sessionId: String, userId: Long, ttlSeconds: Long = 1800L) {
+        val key = "$SESSION_PREFIX$sessionId"
+        val sessionData = mapOf(
+            "userId" to userId,
+            "createdAt" to System.currentTimeMillis(),
+            "lastAccessTime" to System.currentTimeMillis()
+        )
+        redisTemplate.opsForHash<String, Any>().putAll(key, sessionData)
+        redisTemplate.expire(key, Duration.ofSeconds(ttlSeconds))
+    }
+    
+    // 세션 조회
+    fun getSession(sessionId: String): Map<String, Any>? {
+        val key = "$SESSION_PREFIX$sessionId"
+        val sessionData = redisTemplate.opsForHash<String, Any>().entries(key)
+        
+        return if (sessionData.isNotEmpty()) {
+            // 마지막 접근 시간 업데이트
+            redisTemplate.opsForHash<String, Any>().put(key, "lastAccessTime", System.currentTimeMillis())
+            sessionData
+        } else {
+            null
+        }
+    }
+    
+    // 카운터 증가 (조회수, 좋아요 등)
+    fun incrementCounter(key: String): Long {
+        return stringRedisTemplate.opsForValue().increment(key) ?: 0L
+    }
+    
+    // 카운터 값 조회
+    fun getCounter(key: String): Long {
+        return stringRedisTemplate.opsForValue().get(key)?.toLongOrNull() ?: 0L
+    }
+    
+    // Rate Limiting
+    fun flagRateLimited(key: String, limit: Int, windowSeconds: Long): Boolean {
+        val count = stringRedisTemplate.opsForValue().increment(key) ?: 0L
+        
+        if (count == 1L) {
+            stringRedisTemplate.expire(key, Duration.ofSeconds(windowSeconds))
+        }
+        
+        return count > limit
+    }
+}
+```
+
+**애플리케이션 서비스에서 캐시 활용**
+```kotlin
+@Service
+@Transactional(readOnly = true)
+class UserApplicationService(
+    private val userRepository: UserRepository,
+    private val redisCacheService: RedisCacheService
+) {
+    
+    fun getUserById(id: Long): UserResponse {
+        // 1. 캐시에서 먼저 조회
+        redisCacheService.getCachedUser(id)?.let { cachedUser ->
+            return UserResponse.from(cachedUser)
+        }
+        
+        // 2. 캐시에 없으면 데이터베이스에서 조회
+        val user = userRepository.findById(id)
+            ?: throw EntityNotFoundException("User not found with id: $id")
+        
+        // 3. 조회한 데이터를 캐시에 저장
+        redisCacheService.cacheUser(id, user)
+        
+        return UserResponse.from(user)
+    }
+    
+    @Transactional
+    fun updateUser(id: Long, request: UpdateUserRequest): UserResponse {
+        val user = userRepository.findById(id)
+            ?: throw EntityNotFoundException("User not found with id: $id")
+        
+        user.updateName(request.name)
+        val updatedUser = userRepository.save(user)
+        
+        // 캐시 업데이트
+        redisCacheService.cacheUser(id, updatedUser)
+        
+        return UserResponse.from(updatedUser)
+    }
+    
+    @Transactional
+    fun deleteUser(id: Long) {
+        userRepository.findById(id)?.let { user ->
+            userRepository.delete(user)
+            // 캐시에서 삭제
+            redisCacheService.evictUserCache(id)
+        }
+    }
+}
+```
+
+#### 3. Spring Cache 어노테이션 활용
+
+**CacheConfig 설정**
+```kotlin
+@Configuration
+@EnableCaching
+class CacheConfig {
+    
+    @Bean
+    fun cacheManager(): CacheManager {
+        val redisCacheManager = RedisCacheManager.Builder(redisConnectionFactory())
+            .cacheDefaults(
+                RedisCacheConfiguration.defaultCacheConfig()
+                    .entryTtl(Duration.ofHours(1))
+                    .serializeKeysWith(RedisSerializationContext.SerializationPair.fromSerializer(StringRedisSerializer()))
+                    .serializeValuesWith(RedisSerializationContext.SerializationPair.fromSerializer(Jackson2JsonRedisSerializer(Any::class.java)))
+            )
+            .build()
+        
+        return redisCacheManager
+    }
+}
+```
+
+**어노테이션 기반 캐싱**
+```kotlin
+@Service
+class UserService(
+    private val userRepository: UserRepository
+) {
+    
+    @Cacheable(value = ["users"], key = "#id")
+    fun getUserById(id: Long): User? {
+        return userRepository.findById(id)
+    }
+    
+    @Cacheable(value = ["users"], key = "#email.value")
+    fun getUserByEmail(email: Email): User? {
+        return userRepository.findByEmail(email)
+    }
+    
+    @CacheEvict(value = ["users"], key = "#id")
+    fun evictUserCache(id: Long) {
+        // 캐시만 삭제
+    }
+    
+    @CacheEvict(value = ["users"], allEntries = true)
+    fun evictAllUserCache() {
+        // 모든 사용자 캐시 삭제
+    }
+    
+    @CachePut(value = ["users"], key = "#result.id")
+    fun updateUser(id: Long, request: UpdateUserRequest): User {
+        val user = userRepository.findById(id)
+            ?: throw EntityNotFoundException("User not found")
+        
+        user.updateName(request.name)
+        return userRepository.save(user)
+    }
+}
+```
+
+#### 4. 고급 Redis 사용 패턴
+
+**분산 락 구현**
+```kotlin
+@Component
+class RedisDistributedLock(
+    private val stringRedisTemplate: StringRedisTemplate
+) {
+    
+    fun acquireLock(lockKey: String, lockValue: String, expireTime: Long): Boolean {
+        return stringRedisTemplate.opsForValue()
+            .setIfAbsent(lockKey, lockValue, Duration.ofSeconds(expireTime)) ?: false
+    }
+    
+    fun releaseLock(lockKey: String, lockValue: String): Boolean {
+        val script = """
+            if redis.call('get', KEYS[1]) == ARGV[1] then
+                return redis.call('del', KEYS[1])
+            else
+                return 0
+            end
+        """.trimIndent()
+        
+        val result = stringRedisTemplate.execute(
+            RedisScript.of(script, Long::class.java),
+            listOf(lockKey),
+            lockValue
+        )
+        
+        return result == 1L
+    }
+}
+
+// 사용 예시
+@Service
+class OrderService(
+    private val distributedLock: RedisDistributedLock
+) {
+    
+    fun processOrder(orderId: Long) {
+        val lockKey = "order:lock:$orderId"
+        val lockValue = UUID.randomUUID().toString()
+        
+        if (distributedLock.acquireLock(lockKey, lockValue, 30)) {
+            try {
+                // 주문 처리 로직
+                processOrderInternal(orderId)
+            } finally {
+                distributedLock.releaseLock(lockKey, lockValue)
+            }
+        } else {
+            throw IllegalStateException("Could not acquire lock for order: $orderId")
+        }
+    }
+}
+```
+
+**Pub/Sub 메시징**
+```kotlin
+@Component
+class RedisMessagePublisher(
+    private val redisTemplate: RedisTemplate<String, Any>
+) {
+    
+    fun publishMessage(channel: String, message: Any) {
+        redisTemplate.convertAndSend(channel, message)
+    }
+}
+
+@Component
+class RedisMessageSubscriber : MessageListener {
+    
+    override fun onMessage(message: Message, pattern: ByteArray?) {
+        val messageBody = String(message.body)
+        val channel = String(message.channel)
+        
+        // 메시지 처리 로직
+        processMessage(channel, messageBody)
+    }
+    
+    private fun processMessage(channel: String, message: String) {
+        when (channel) {
+            "user.created" -> handleUserCreated(message)
+            "user.updated" -> handleUserUpdated(message)
+            else -> println("Unknown channel: $channel")
+        }
+    }
+}
+
+@Configuration
+class RedisMessageConfig {
+    
+    @Bean
+    fun redisMessageListenerContainer(
+        connectionFactory: RedisConnectionFactory,
+        messageSubscriber: RedisMessageSubscriber
+    ): RedisMessageListenerContainer {
+        val container = RedisMessageListenerContainer()
+        container.setConnectionFactory(connectionFactory)
+        container.addMessageListener(messageSubscriber, PatternTopic("user.*"))
+        return container
+    }
+}
+```
+
+#### 5. 성능 최적화 및 모니터링
+
+**Redis 성능 모니터링**
+```kotlin
+@Component
+class RedisHealthIndicator(
+    private val redisTemplate: RedisTemplate<String, Any>
+) : HealthIndicator {
+    
+    override fun health(): Health {
+        return try {
+            val connection = redisTemplate.connectionFactory?.connection
+            val info = connection?.info() ?: emptyMap()
+            
+            Health.up()
+                .withDetail("redis", "Available")
+                .withDetail("version", info["redis_version"])
+                .withDetail("used_memory", info["used_memory_human"])
+                .build()
+        } catch (e: Exception) {
+            Health.down()
+                .withDetail("redis", "Not Available")
+                .withException(e)
+                .build()
+        }
+    }
+}
+```
+
+**Redis 연결 풀 최적화**
+```yaml
+spring:
+  redis:
+    lettuce:
+      pool:
+        max-active: 16        # 최대 활성 연결 수
+        max-idle: 8           # 최대 유휴 연결 수  
+        min-idle: 2           # 최소 유휴 연결 수
+        max-wait: 1000ms      # 연결 대기 시간
+      shutdown-timeout: 100ms # 종료 대기 시간
+    timeout: 3000ms          # 명령 실행 타임아웃
+```
+
+#### 6. Redis 개발/운영 팁
+
+**개발 환경에서 Redis 사용**
+```bash
+# Docker로 Redis 실행
+docker run -d --name redis -p 6379:6379 redis:7-alpine
+
+# Redis CLI 접속
+docker exec -it redis redis-cli
+
+# 기본 명령어
+redis-cli ping
+redis-cli keys "*"
+redis-cli flushall  # 모든 데이터 삭제 (개발용)
+```
+
+**성능 고려사항**
+- **키 설계**: 네임스페이스 사용 (`user:123`, `session:abc`)
+- **만료 시간**: 모든 캐시에 적절한 TTL 설정
+- **메모리 관리**: maxmemory 정책 설정 (allkeys-lru 권장)
+- **파이프라이닝**: 여러 명령어를 한 번에 실행하여 네트워크 왕복 최소화
+
+**보안 고려사항**
+- Redis 패스워드 설정
+- 방화벽으로 포트 제한
+- Redis Sentinel 또는 Cluster 사용 (고가용성)
+
+### MongoDB 설정 및 사용 가이드
+
+#### 1. MongoDB 설정
+
+**build.gradle.kts 의존성 추가**
+```kotlin
+dependencies {
+    implementation("org.springframework.boot:spring-boot-starter-data-mongodb")
+    implementation("org.springframework.boot:spring-boot-starter-data-mongodb-reactive") // 반응형 사용 시
+}
+```
+
+**application.yml 설정**
+```yaml
+spring:
+  data:
+    mongodb:
+      uri: ${MONGODB_URI:mongodb://localhost:27017/appdb}
+      # 또는 개별 설정
+      host: ${MONGODB_HOST:localhost}
+      port: ${MONGODB_PORT:27017}
+      database: ${MONGODB_DATABASE:appdb}
+      username: ${MONGODB_USERNAME:}
+      password: ${MONGODB_PASSWORD:}
+      authentication-database: admin
+      
+  # MongoDB 로깅 설정
+logging:
+  level:
+    org.springframework.data.mongodb: DEBUG
+    org.mongodb.driver: INFO
+```
+
+**MongoDB 설정 클래스**
+```kotlin
+@Configuration
+@EnableMongoRepositories
+class MongoConfig {
+    
+    @Value("\${spring.data.mongodb.uri}")
+    private lateinit var mongoUri: String
+    
+    @Bean
+    fun mongoClient(): MongoClient {
+        val connectionString = ConnectionString(mongoUri)
+        val settings = MongoClientSettings.builder()
+            .applyConnectionString(connectionString)
+            .codecRegistry(
+                CodecRegistries.fromRegistries(
+                    MongoClientSettings.getDefaultCodecRegistry(),
+                    CodecRegistries.fromProviders(PojoCodecProvider.builder().automatic(true).build())
+                )
+            )
+            .build()
+        
+        return MongoClients.create(settings)
+    }
+    
+    @Bean
+    fun mongoTemplate(mongoClient: MongoClient): MongoTemplate {
+        return MongoTemplate(mongoClient, "appdb")
+    }
+    
+    // 트랜잭션 매니저 설정 (MongoDB 4.0+ 복제본 세트에서만 지원)
+    @Bean
+    fun mongoTransactionManager(mongoDbFactory: MongoDatabaseFactory): MongoTransactionManager {
+        return MongoTransactionManager(mongoDbFactory)
+    }
+}
+```
+
+#### 2. Document 모델링
+
+**기본 Document 엔티티**
+```kotlin
+@Document(collection = "users")
+data class UserDocument(
+    @Id
+    @Field("_id")
+    val id: String? = null,
+    
+    @Field("name")
+    val name: String,
+    
+    @Field("email")
+    val email: String,
+    
+    @Field("age")
+    val age: Int? = null,
+    
+    @Field("status")
+    val status: UserStatus = UserStatus.ACTIVE,
+    
+    @Field("profile")
+    val profile: UserProfile? = null,
+    
+    @Field("tags")
+    val tags: List<String> = emptyList(),
+    
+    @Field("metadata")
+    val metadata: Map<String, Any> = emptyMap(),
+    
+    @Field("created_at")
+    val createdAt: LocalDateTime = LocalDateTime.now(),
+    
+    @Field("updated_at")
+    val updatedAt: LocalDateTime = LocalDateTime.now()
+) {
+    // 비즈니스 로직 메서드
+    fun flagActive(): Boolean = status == UserStatus.ACTIVE
+    
+    fun hasTag(tag: String): Boolean = tags.contains(tag)
+    
+    fun addTag(tag: String): UserDocument {
+        return copy(tags = tags + tag, updatedAt = LocalDateTime.now())
+    }
+    
+    fun updateProfile(newProfile: UserProfile): UserDocument {
+        return copy(profile = newProfile, updatedAt = LocalDateTime.now())
+    }
+}
+
+// 임베디드 도큐먼트
+data class UserProfile(
+    @Field("avatar_url")
+    val avatarUrl: String? = null,
+    
+    @Field("bio")
+    val bio: String? = null,
+    
+    @Field("social_links")
+    val socialLinks: Map<String, String> = emptyMap(),
+    
+    @Field("preferences")
+    val preferences: UserPreferences = UserPreferences()
+)
+
+data class UserPreferences(
+    @Field("theme")
+    val theme: String = "light",
+    
+    @Field("language")
+    val language: String = "ko",
+    
+    @Field("notifications")
+    val notifications: NotificationSettings = NotificationSettings()
+)
+
+data class NotificationSettings(
+    @Field("email_enabled")
+    val emailEnabled: Boolean = true,
+    
+    @Field("push_enabled")
+    val pushEnabled: Boolean = true,
+    
+    @Field("marketing_enabled")
+    val marketingEnabled: Boolean = false
+)
+
+enum class UserStatus {
+    ACTIVE, INACTIVE, SUSPENDED, DELETED
+}
+```
+
+**복잡한 Document 예제 (블로그 포스트)**
+```kotlin
+@Document(collection = "posts")
+data class PostDocument(
+    @Id
+    val id: String? = null,
+    
+    @Field("title")
+    val title: String,
+    
+    @Field("content")
+    val content: String,
+    
+    @Field("author_id")
+    val authorId: String,
+    
+    @Field("author_name")
+    val authorName: String,
+    
+    @Field("category")
+    val category: String,
+    
+    @Field("tags")
+    val tags: List<String> = emptyList(),
+    
+    @Field("comments")
+    val comments: List<Comment> = emptyList(),
+    
+    @Field("meta")
+    val meta: PostMeta = PostMeta(),
+    
+    @Field("published")
+    val published: Boolean = false,
+    
+    @Field("published_at")
+    val publishedAt: LocalDateTime? = null,
+    
+    @Field("created_at")
+    val createdAt: LocalDateTime = LocalDateTime.now(),
+    
+    @Field("updated_at")
+    val updatedAt: LocalDateTime = LocalDateTime.now()
+) {
+    fun addComment(comment: Comment): PostDocument {
+        return copy(
+            comments = comments + comment,
+            meta = meta.copy(commentCount = comments.size + 1),
+            updatedAt = LocalDateTime.now()
+        )
+    }
+    
+    fun publish(): PostDocument {
+        return copy(
+            published = true,
+            publishedAt = LocalDateTime.now(),
+            updatedAt = LocalDateTime.now()
+        )
+    }
+}
+
+data class Comment(
+    @Field("id")
+    val id: String = ObjectId().toString(),
+    
+    @Field("author_id")
+    val authorId: String,
+    
+    @Field("author_name")
+    val authorName: String,
+    
+    @Field("content")
+    val content: String,
+    
+    @Field("created_at")
+    val createdAt: LocalDateTime = LocalDateTime.now()
+)
+
+data class PostMeta(
+    @Field("view_count")
+    val viewCount: Long = 0,
+    
+    @Field("like_count")
+    val likeCount: Long = 0,
+    
+    @Field("comment_count")
+    val commentCount: Long = 0,
+    
+    @Field("reading_time")
+    val readingTime: Int = 0 // 분 단위
+)
+```
+
+#### 3. Repository 패턴
+
+**기본 Repository 인터페이스**
+```kotlin
+interface UserRepository : MongoRepository<UserDocument, String> {
+    
+    // 메서드 이름 기반 쿼리
+    fun findByEmail(email: String): UserDocument?
+    fun findByNameContainingIgnoreCase(name: String): List<UserDocument>
+    fun findByStatus(status: UserStatus): List<UserDocument>
+    fun findByTagsContaining(tag: String): List<UserDocument>
+    fun findByCreatedAtBetween(start: LocalDateTime, end: LocalDateTime): List<UserDocument>
+    
+    // 페이징 지원
+    fun findByStatus(status: UserStatus, pageable: Pageable): Page<UserDocument>
+    
+    // 복합 조건
+    fun findByStatusAndCreatedAtAfter(status: UserStatus, createdAt: LocalDateTime): List<UserDocument>
+    
+    // 존재 여부 확인
+    fun existsByEmail(email: String): Boolean
+    
+    // 카운트
+    fun countByStatus(status: UserStatus): Long
+    
+    // 정렬
+    fun findByStatusOrderByCreatedAtDesc(status: UserStatus): List<UserDocument>
+}
+```
+
+**커스텀 Repository 구현**
+```kotlin
+interface UserRepositoryCustom {
+    fun findUsersByComplexCriteria(criteria: UserSearchCriteria): List<UserDocument>
+    fun findUsersWithAggregation(): List<UserStatsDto>
+    fun updateUserTags(userId: String, tags: List<String>): UpdateResult
+}
+
+@Repository
+class UserRepositoryCustomImpl(
+    private val mongoTemplate: MongoTemplate
+) : UserRepositoryCustom {
+    
+    override fun findUsersByComplexCriteria(criteria: UserSearchCriteria): List<UserDocument> {
+        val query = Query()
+        
+        // 동적 쿼리 구성
+        criteria.name?.let { 
+            query.addCriteria(Criteria.where("name").regex(".*$it.*", "i"))
+        }
+        
+        criteria.email?.let {
+            query.addCriteria(Criteria.where("email").`is`(it))
+        }
+        
+        criteria.status?.let {
+            query.addCriteria(Criteria.where("status").`is`(it))
+        }
+        
+        criteria.tags?.let { tags ->
+            if (tags.isNotEmpty()) {
+                query.addCriteria(Criteria.where("tags").`in`(tags))
+            }
+        }
+        
+        criteria.ageRange?.let { range ->
+            query.addCriteria(Criteria.where("age").gte(range.min).lte(range.max))
+        }
+        
+        criteria.createdAfter?.let {
+            query.addCriteria(Criteria.where("created_at").gte(it))
+        }
+        
+        // 정렬 및 페이징
+        criteria.sortBy?.let { sortBy ->
+            val sort = if (criteria.sortOrder == "desc") {
+                Sort.by(Sort.Direction.DESC, sortBy)
+            } else {
+                Sort.by(Sort.Direction.ASC, sortBy)
+            }
+            query.with(sort)
+        }
+        
+        criteria.limit?.let { limit ->
+            query.limit(limit)
+            criteria.offset?.let { offset ->
+                query.skip(offset.toLong())
+            }
+        }
+        
+        return mongoTemplate.find(query, UserDocument::class.java)
+    }
+    
+    override fun findUsersWithAggregation(): List<UserStatsDto> {
+        val aggregation = Aggregation.newAggregation(
+            Aggregation.match(Criteria.where("status").`is`(UserStatus.ACTIVE)),
+            Aggregation.group("status")
+                .count().`as`("count")
+                .avg("age").`as`("avgAge")
+                .first("status").`as`("status"),
+            Aggregation.sort(Sort.Direction.DESC, "count")
+        )
+        
+        return mongoTemplate.aggregate(aggregation, "users", UserStatsDto::class.java).mappedResults
+    }
+    
+    override fun updateUserTags(userId: String, tags: List<String>): UpdateResult {
+        val query = Query(Criteria.where("id").`is`(userId))
+        val update = Update()
+            .set("tags", tags)
+            .set("updated_at", LocalDateTime.now())
+        
+        return mongoTemplate.updateFirst(query, update, UserDocument::class.java)
+    }
+}
+
+// 검색 조건 DTO
+data class UserSearchCriteria(
+    val name: String? = null,
+    val email: String? = null,
+    val status: UserStatus? = null,
+    val tags: List<String>? = null,
+    val ageRange: AgeRange? = null,
+    val createdAfter: LocalDateTime? = null,
+    val sortBy: String? = null,
+    val sortOrder: String = "asc",
+    val limit: Int? = null,
+    val offset: Int? = null
+)
+
+data class AgeRange(val min: Int, val max: Int)
+data class UserStatsDto(val status: UserStatus, val count: Long, val avgAge: Double)
+```
+
+#### 4. Service 계층 구현
+
+**MongoDB 서비스 클래스**
+```kotlin
+@Service
+@Transactional
+class UserMongoService(
+    private val userRepository: UserRepository,
+    private val mongoTemplate: MongoTemplate
+) {
+    
+    fun createUser(request: CreateUserRequest): UserDocument {
+        // 이메일 중복 체크
+        if (userRepository.existsByEmail(request.email)) {
+            throw DuplicateEmailException("Email already exists: ${request.email}")
+        }
+        
+        val userDocument = UserDocument(
+            name = request.name,
+            email = request.email,
+            age = request.age,
+            tags = request.tags ?: emptyList()
+        )
+        
+        return userRepository.save(userDocument)
+    }
+    
+    @Transactional(readOnly = true)
+    fun getUserById(id: String): UserDocument {
+        return userRepository.findById(id)
+            .orElseThrow { EntityNotFoundException("User not found with id: $id") }
+    }
+    
+    @Transactional(readOnly = true)
+    fun getUserByEmail(email: String): UserDocument? {
+        return userRepository.findByEmail(email)
+    }
+    
+    @Transactional(readOnly = true)
+    fun searchUsers(criteria: UserSearchCriteria): List<UserDocument> {
+        return userRepository.findUsersByComplexCriteria(criteria)
+    }
+    
+    @Transactional(readOnly = true)
+    fun getUsersByStatus(status: UserStatus, pageable: Pageable): Page<UserDocument> {
+        return userRepository.findByStatus(status, pageable)
+    }
+    
+    fun updateUser(id: String, request: UpdateUserRequest): UserDocument {
+        val existingUser = getUserById(id)
+        
+        val updatedUser = existingUser.copy(
+            name = request.name ?: existingUser.name,
+            age = request.age ?: existingUser.age,
+            status = request.status ?: existingUser.status,
+            updatedAt = LocalDateTime.now()
+        )
+        
+        return userRepository.save(updatedUser)
+    }
+    
+    fun addTagToUser(userId: String, tag: String): UserDocument {
+        val user = getUserById(userId)
+        val updatedUser = user.addTag(tag)
+        return userRepository.save(updatedUser)
+    }
+    
+    fun updateUserProfile(userId: String, profile: UserProfile): UserDocument {
+        val user = getUserById(userId)
+        val updatedUser = user.updateProfile(profile)
+        return userRepository.save(updatedUser)
+    }
+    
+    fun deleteUser(id: String) {
+        if (!userRepository.existsById(id)) {
+            throw EntityNotFoundException("User not found with id: $id")
+        }
+        userRepository.deleteById(id)
+    }
+    
+    // 벌크 연산
+    fun updateUsersStatus(userIds: List<String>, status: UserStatus): Long {
+        val query = Query(Criteria.where("id").`in`(userIds))
+        val update = Update()
+            .set("status", status)
+            .set("updated_at", LocalDateTime.now())
+        
+        val result = mongoTemplate.updateMulti(query, update, UserDocument::class.java)
+        return result.modifiedCount
+    }
+    
+    // 집계 연산 예제
+    @Transactional(readOnly = true)
+    fun getUserStatistics(): UserStatistics {
+        val totalUsers = userRepository.count()
+        val activeUsers = userRepository.countByStatus(UserStatus.ACTIVE)
+        val inactiveUsers = userRepository.countByStatus(UserStatus.INACTIVE)
+        
+        // 집계 파이프라인을 사용한 통계
+        val aggregation = Aggregation.newAggregation(
+            Aggregation.match(Criteria.where("age").ne(null)),
+            Aggregation.group()
+                .avg("age").`as`("avgAge")
+                .min("age").`as`("minAge")
+                .max("age").`as`("maxAge")
+        )
+        
+        val ageStats = mongoTemplate.aggregate(aggregation, "users", AgeStatistics::class.java)
+            .uniqueMappedResult ?: AgeStatistics()
+        
+        return UserStatistics(
+            totalUsers = totalUsers,
+            activeUsers = activeUsers,
+            inactiveUsers = inactiveUsers,
+            ageStatistics = ageStats
+        )
+    }
+}
+
+data class UserStatistics(
+    val totalUsers: Long,
+    val activeUsers: Long,
+    val inactiveUsers: Long,
+    val ageStatistics: AgeStatistics
+)
+
+data class AgeStatistics(
+    val avgAge: Double = 0.0,
+    val minAge: Int = 0,
+    val maxAge: Int = 0
+)
+```
+
+#### 5. 고급 MongoDB 기능
+
+**집계 파이프라인 활용**
+```kotlin
+@Service
+class PostAnalyticsService(
+    private val mongoTemplate: MongoTemplate
+) {
+    
+    // 복잡한 집계 쿼리 예제
+    fun getPostAnalytics(): PostAnalytics {
+        // 1. 카테고리별 포스트 수와 평균 조회수
+        val categoryStats = Aggregation.newAggregation(
+            Aggregation.match(Criteria.where("published").`is`(true)),
+            Aggregation.group("category")
+                .count().`as`("postCount")
+                .avg("meta.view_count").`as`("avgViews")
+                .sum("meta.view_count").`as`("totalViews")
+                .first("category").`as`("category"),
+            Aggregation.sort(Sort.Direction.DESC, "totalViews")
+        )
+        
+        val categoryResults = mongoTemplate.aggregate(
+            categoryStats, "posts", CategoryStats::class.java
+        ).mappedResults
+        
+        // 2. 월별 포스트 발행 트렌드
+        val monthlyTrend = Aggregation.newAggregation(
+            Aggregation.match(Criteria.where("published").`is`(true)),
+            Aggregation.project()
+                .and("published_at").extractYear().`as`("year")
+                .and("published_at").extractMonth().`as`("month")
+                .andInclude("title"),
+            Aggregation.group("year", "month")
+                .count().`as`("postCount"),
+            Aggregation.sort(Sort.Direction.DESC, "_id.year", "_id.month")
+        )
+        
+        val trendResults = mongoTemplate.aggregate(
+            monthlyTrend, "posts", MonthlyTrend::class.java
+        ).mappedResults
+        
+        // 3. 인기 태그 분석
+        val popularTags = Aggregation.newAggregation(
+            Aggregation.match(Criteria.where("published").`is`(true)),
+            Aggregation.unwind("tags"),
+            Aggregation.group("tags")
+                .count().`as`("count")
+                .first("tags").`as`("tag"),
+            Aggregation.sort(Sort.Direction.DESC, "count"),
+            Aggregation.limit(10)
+        )
+        
+        val tagResults = mongoTemplate.aggregate(
+            popularTags, "posts", TagStats::class.java
+        ).mappedResults
+        
+        return PostAnalytics(
+            categoryStats = categoryResults,
+            monthlyTrend = trendResults,
+            popularTags = tagResults
+        )
+    }
+    
+    // 사용자별 활동 분석
+    fun getUserActivity(userId: String): UserActivity {
+        val userPosts = Aggregation.newAggregation(
+            Aggregation.match(Criteria.where("author_id").`is`(userId)),
+            Aggregation.group()
+                .count().`as`("totalPosts")
+                .sum("meta.view_count").`as`("totalViews")
+                .sum("meta.like_count").`as`("totalLikes")
+                .sum("meta.comment_count").`as`("totalComments")
+        )
+        
+        val activity = mongoTemplate.aggregate(
+            userPosts, "posts", UserActivity::class.java
+        ).uniqueMappedResult ?: UserActivity()
+        
+        return activity
+    }
+}
+
+data class PostAnalytics(
+    val categoryStats: List<CategoryStats>,
+    val monthlyTrend: List<MonthlyTrend>,
+    val popularTags: List<TagStats>
+)
+
+data class CategoryStats(
+    val category: String,
+    val postCount: Long,
+    val avgViews: Double,
+    val totalViews: Long
+)
+
+data class MonthlyTrend(
+    val year: Int,
+    val month: Int,
+    val postCount: Long
+)
+
+data class TagStats(
+    val tag: String,
+    val count: Long
+)
+
+data class UserActivity(
+    val totalPosts: Long = 0,
+    val totalViews: Long = 0,
+    val totalLikes: Long = 0,
+    val totalComments: Long = 0
+)
+```
+
+**MongoDB 트랜잭션 사용**
+```kotlin
+@Service
+@Transactional
+class UserPostService(
+    private val userRepository: UserRepository,
+    private val postRepository: PostRepository,
+    private val mongoTemplate: MongoTemplate
+) {
+    
+    // MongoDB 트랜잭션을 사용한 복합 작업
+    @Transactional
+    fun createUserAndFirstPost(
+        userRequest: CreateUserRequest,
+        postRequest: CreatePostRequest
+    ): Pair<UserDocument, PostDocument> {
+        
+        // 1. 사용자 생성
+        val user = UserDocument(
+            name = userRequest.name,
+            email = userRequest.email,
+            age = userRequest.age
+        )
+        val savedUser = userRepository.save(user)
+        
+        // 2. 첫 번째 포스트 생성
+        val post = PostDocument(
+            title = postRequest.title,
+            content = postRequest.content,
+            authorId = savedUser.id!!,
+            authorName = savedUser.name,
+            category = postRequest.category
+        )
+        val savedPost = postRepository.save(post)
+        
+        // 3. 사용자에게 "author" 태그 추가
+        val updatedUser = savedUser.addTag("author")
+        userRepository.save(updatedUser)
+        
+        return Pair(updatedUser, savedPost)
+    }
+    
+    // 세션 기반 트랜잭션 (더 세밀한 제어)
+    fun transferPostOwnership(fromUserId: String, toUserId: String, postId: String) {
+        mongoTemplate.execute { session ->
+            session.withTransaction {
+                // 1. 포스트 소유권 변경
+                val query = Query(Criteria.where("id").`is`(postId))
+                val update = Update()
+                    .set("author_id", toUserId)
+                    .set("updated_at", LocalDateTime.now())
+                
+                mongoTemplate.updateFirst(query, update, PostDocument::class.java)
+                
+                // 2. 이전 소유자의 포스트 수 감소 (메타데이터가 있다면)
+                // 3. 새 소유자의 포스트 수 증가
+                // ... 추가 로직
+                
+                null // 반환값
+            }
+        }
+    }
+}
+```
+
+#### 6. 성능 최적화
+
+**인덱스 설정**
+```kotlin
+@Configuration
+class MongoIndexConfig(
+    private val mongoTemplate: MongoTemplate
+) {
+    
+    @PostConstruct
+    fun initIndexes() {
+        // Users 컬렉션 인덱스
+        mongoTemplate.indexOps(UserDocument::class.java).apply {
+            // 이메일 유니크 인덱스
+            ensureIndex(
+                Index().on("email", Sort.Direction.ASC).unique()
+            )
+            
+            // 상태별 조회 인덱스
+            ensureIndex(
+                Index().on("status", Sort.Direction.ASC)
+            )
+            
+            // 태그 검색 인덱스
+            ensureIndex(
+                Index().on("tags", Sort.Direction.ASC)
+            )
+            
+            // 생성일시 인덱스 (TTL 설정 가능)
+            ensureIndex(
+                Index().on("created_at", Sort.Direction.DESC)
+            )
+            
+            // 복합 인덱스
+            ensureIndex(
+                Index()
+                    .on("status", Sort.Direction.ASC)
+                    .on("created_at", Sort.Direction.DESC)
+            )
+        }
+        
+        // Posts 컬렉션 인덱스
+        mongoTemplate.indexOps(PostDocument::class.java).apply {
+            // 카테고리별 인덱스
+            ensureIndex(Index().on("category", Sort.Direction.ASC))
+            
+            // 작성자별 인덱스
+            ensureIndex(Index().on("author_id", Sort.Direction.ASC))
+            
+            // 발행일시 인덱스
+            ensureIndex(Index().on("published_at", Sort.Direction.DESC))
+            
+            // 텍스트 검색 인덱스
+            ensureIndex(
+                Index()
+                    .on("title", Sort.Direction.ASC)
+                    .on("content", Sort.Direction.ASC)
+                    .named("text_search")
+            )
+            
+            // 복합 인덱스 (발행된 포스트의 카테고리별 정렬)
+            ensureIndex(
+                Index()
+                    .on("published", Sort.Direction.ASC)
+                    .on("category", Sort.Direction.ASC)
+                    .on("published_at", Sort.Direction.DESC)
+            )
+        }
+    }
+}
+```
+
+**쿼리 최적화 팁**
+```kotlin
+@Service
+class OptimizedQueryService(
+    private val mongoTemplate: MongoTemplate
+) {
+    
+    // ✅ 좋은 예: 필요한 필드만 프로젝션
+    fun getUserBasicInfo(userId: String): UserBasicInfo? {
+        val query = Query(Criteria.where("id").`is`(userId))
+        query.fields()
+            .include("name")
+            .include("email")
+            .include("status")
+        
+        return mongoTemplate.findOne(query, UserBasicInfo::class.java, "users")
+    }
+    
+    // ✅ 좋은 예: 인덱스를 활용한 정렬
+    fun getRecentActiveUsers(limit: Int): List<UserDocument> {
+        val query = Query(Criteria.where("status").`is`(UserStatus.ACTIVE))
+        query.with(Sort.by(Sort.Direction.DESC, "created_at"))
+        query.limit(limit)
+        
+        return mongoTemplate.find(query, UserDocument::class.java)
+    }
+    
+    // ✅ 좋은 예: 벌크 연산 사용
+    fun markUsersAsInactive(userIds: List<String>): Long {
+        val query = Query(Criteria.where("id").`in`(userIds))
+        val update = Update()
+            .set("status", UserStatus.INACTIVE)
+            .set("updated_at", LocalDateTime.now())
+        
+        return mongoTemplate.updateMulti(query, update, UserDocument::class.java).modifiedCount
+    }
+    
+    // ❌ 나쁜 예: 전체 컬렉션 스캔
+    fun getAllUsersWithoutPaging(): List<UserDocument> {
+        return mongoTemplate.findAll(UserDocument::class.java) // 위험!
+    }
+    
+    // ✅ 좋은 예: 페이징과 제한 사용
+    fun getUsersWithPaging(page: Int, size: Int): List<UserDocument> {
+        val pageable = PageRequest.of(page, size, Sort.by("created_at").descending())
+        val query = Query().with(pageable)
+        
+        return mongoTemplate.find(query, UserDocument::class.java)
+    }
+}
+
+data class UserBasicInfo(
+    val name: String,
+    val email: String,
+    val status: UserStatus
+)
+```
+
+#### 7. MongoDB 개발/운영 팁
+
+**개발 환경 설정**
+```bash
+# Docker로 MongoDB 실행
+docker run -d --name mongodb -p 27017:27017 -e MONGO_INITDB_ROOT_USERNAME=admin -e MONGO_INITDB_ROOT_PASSWORD=password mongo:7
+
+# MongoDB Compass 연결
+mongodb://admin:password@localhost:27017/
+
+# MongoDB CLI 접속
+docker exec -it mongodb mongosh
+
+# 기본 명령어
+show dbs
+use appdb
+db.users.find()
+db.users.createIndex({"email": 1}, {"unique": true})
+```
+
+**성능 모니터링**
+```kotlin
+@Component
+class MongoHealthIndicator(
+    private val mongoTemplate: MongoTemplate
+) : HealthIndicator {
+    
+    override fun health(): Health {
+        return try {
+            val dbStats = mongoTemplate.execute { db ->
+                db.runCommand(Document("dbStats", 1))
+            }
+            
+            Health.up()
+                .withDetail("mongodb", "Available")
+                .withDetail("database", dbStats?.getString("db"))
+                .withDetail("collections", dbStats?.getInteger("collections"))
+                .withDetail("dataSize", dbStats?.get("dataSize"))
+                .build()
+        } catch (e: Exception) {
+            Health.down()
+                .withDetail("mongodb", "Not Available")
+                .withException(e)
+                .build()
+        }
+    }
+}
+```
+
+**베스트 프랙티스**
+- **문서 설계**: 임베디드 vs 참조 전략을 신중히 선택
+- **인덱스 전략**: 쿼리 패턴에 맞는 인덱스 설계
+- **데이터 모델링**: 읽기 패턴에 최적화된 스키마 설계
+- **집계 파이프라인**: 복잡한 분석은 집계 활용
+- **트랜잭션**: 필요한 경우에만 사용 (성능 고려)
+- **샤딩**: 대용량 데이터의 경우 샤딩 전략 고려
 
 ### REST API 설계 가이드
 
@@ -3105,7 +4450,7 @@ jobs:
         uses: codecov/codecov-action@v3
 ```
 
-## 배포 프로세스 (Docker 기반)
+## 배포 프로세스
 
 ### Docker 컨테이너화 전략
 
@@ -3114,9 +4459,9 @@ jobs:
 ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
 │   Build Stage   │───▶│  Runtime Stage  │───▶│  Production     │
 │                 │    │                 │    │  Container      │
-│ • 의존성 설치    │    │ • 최소 런타임    │    │ • 최적화된 이미지│
-│ • 코드 빌드      │    │ • 보안 강화      │    │ • 자동 배포      │
-│ • 테스트 실행    │    │ • 성능 최적화    │    │ • 헬스 체크      │
+│ • 의존성 설치      │    │ • 최소 런타임     │     │ • 최적화된 이미지   │
+│ • 코드 빌드       │    │ • 보안 강화       │     │ • 자동 배포       │
+│ • 테스트 실행      │    │ • 성능 최적화     │     │ • 헬스 체크       │
 └─────────────────┘    └─────────────────┘    └─────────────────┘
 ```
 
@@ -4075,8 +5420,6 @@ docker-compose -f docker-compose.staging.yml exec frontend npm run test:e2e
 # 트래픽 모니터링
 docker-compose -f docker-compose.prod.yml exec nginx tail -f /var/log/nginx/access.log
 ```
-
-이제 **완전한 Docker 기반 배포 프로세스**가 완성되었습니다! 🐳✨
 
 ## 문제 해결
 
